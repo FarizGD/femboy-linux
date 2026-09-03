@@ -89,19 +89,26 @@ else
 fi
 arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
 
-# Femboy Linux compatibility wrapper and branding assets bundled in the ISO.
+# Distro payload bundled into the installer ISO.
 if [[ -f /usr/share/femboy-linux/apt ]]; then
   install -Dm755 /usr/share/femboy-linux/apt /mnt/usr/bin/apt
   ln -sf apt /mnt/usr/bin/apt-get
 fi
 
-if [[ -d /usr/share/femboy-linux/wallpapers ]]; then
-  mkdir -p /mnt/usr/share/femboy-linux/wallpapers
-  cp -a /usr/share/femboy-linux/wallpapers/. /mnt/usr/share/femboy-linux/wallpapers/
+if [[ -d /usr/share/femboy-linux/rootfs ]]; then
+  cp -a /usr/share/femboy-linux/rootfs/. /mnt/
 fi
 
-if [[ -d /usr/share/femboy-linux/plasma ]]; then
-  cp -a /usr/share/femboy-linux/plasma/. /mnt/
+if [[ -d /usr/share/femboy-linux/wallpapers ]]; then
+  mkdir -p /usr/share/femboy-linux/runtime-wallpapers
+  cp -a /usr/share/femboy-linux/wallpapers/. /usr/share/femboy-linux/runtime-wallpapers/
+  if [[ -x /usr/share/femboy-linux/install-wallpapers.sh ]]; then
+    mkdir -p /tmp/femboy-wallpaper-payload
+    ln -sfn /usr/share/femboy-linux/runtime-wallpapers /tmp/femboy-wallpaper-payload/wallpapers
+    cp /usr/share/femboy-linux/install-wallpapers.sh /tmp/femboy-wallpaper-payload/install-wallpapers.sh
+    DESTDIR=/mnt bash /tmp/femboy-wallpaper-payload/install-wallpapers.sh || true
+    rm -rf /tmp/femboy-wallpaper-payload /usr/share/femboy-linux/runtime-wallpapers
+  fi
 fi
 
 sync
