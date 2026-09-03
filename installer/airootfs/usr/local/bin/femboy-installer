@@ -1,28 +1,78 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if command -v zenity >/dev/null 2>&1; then
-  zenity --info --title="Femboy Linux Installer" --width=520 --text="Femboy Linux installer environment is ready.\n\nCalamares is not bundled yet because it is not in the official Arch repositories. Open a terminal to continue development/testing."
-fi
+TITLE='Femboy Linux Installer'
 
-exec xterm -fa Monospace -fs 12 -title "Femboy Linux Installer" -e bash -lc '
-clear
-cat <<"EOF"
-Femboy Linux Installer
-======================
+error() { zenity --error --title="$TITLE" --width=520 --text="$1"; }
+info() { zenity --info --title="$TITLE" --width=520 --text="$1"; }
 
-Installer environment booted successfully.
+command -v zenity >/dev/null || { echo 'zenity missing'; exit 1; }
 
-Current milestone:
-  [x] Bootable installer ISO
-  [x] Networking tools
-  [x] Disk/partition tools
-  [ ] Calamares package integration
-  [ ] Automated KDE Plasma installation
-  [ ] Bootloader + user configuration
+while true; do
+  mapfile -t DISKS < <(lsblk -dpno NAME,SIZE,MODEL,TYPE | awk '$NF=="disk" {type=$NF; $NF=""; sub(/[[:space:]]+$/,""); print}')
+  ((${#DISKS[@]})) || { error 'No installable disks were detected.'; exit 1; }
 
-Repository: https://github.com/FarizGD/femboy-linux
+  rows=()
+  for row in "${DISKS[@]}"; do
+    dev="${row%% *}"
+    desc="${row#* }"
+    rows+=("$dev" "$desc")
+  done
 
-EOF
-exec bash
-'
+  DISK=$(zenity --list --title="$TITLE — Select disk" --width=760 --height=420 \
+    --text='Choose the disk to install Femboy Linux onto. THIS DISK WILL BE ERASED.' \
+    --column='Device' --column='Size / Model' "${rows[@]}") || exit 0
+  [[ -n "$DISK" ]] || continue
+
+  HOSTNAME=$(zenity --entry --title="$TITLE — Computer name" --text='Computer name:' --entry-text='femboy-linux') || exit 0
+  USERNAME=$(zenity --entry --title="$TITLE — User" --text='Username:' --entry-text='user') || exit 0
+  PASSWORD=$(zenity --password --title="$TITLE — Password" --text="Password for $USERNAME:") || exit 0
+  PASSWORD2=$(zenity --password --title="$TITLE — Confirm password" --text='Enter the password again:') || exit 0
+  [[ "$PASSWORD" == "$PASSWORD2" ]] || { error 'The passwords do not match.'; continue; }
+  [[ -n "$PASSWORD" ]] || { error 'Password cannot be empty.'; continue; }
+
+  TIMEZONE=$(zenity --entry --title="$TITLE — Time zone" \
+    --text='IANA timezone (examples: UTC, Asia/Jakarta, Europe/London):' --entry-text='UTC') || exit 0
+
+  SUMMARY="Disk: $DISK\nHostname: $HOSTNAME\nUser: $USERNAME\nTimezone: $TIMEZONE\n\nALL DATA ON $DISK WILL BE ERASED."
+  zenity --question --title="$TITLE — Confirm installation" --width=560 \
+    --ok-label='ERASE DISK AND INSTALL' --cancel-label='Go back' --text="$SUMMARY" || continue
+
+  CFG=$(mktemp /tmp/femboy-install.XXXXXX)
+  chmod 600 "$CFG"
+  {
+    printf 'DISK=%q\n' "$DISK"
+    printf 'HOSTNAME=%q\n' "$HOSTNAME"
+    printf 'USERNAME=%q\n' "$USERNAME"
+    printf 'PASSWORD=%q\n' "$PASSWORD"
+    printf 'TIMEZONE=%q\n' "$TIMEZONE"
+  } > "$CFG"
+
+  LOG=/tmp/femboy-install.log
+  : > "$LOG"
+
+  (
+    echo '5'; echo '# Preparing disk...'
+    if sudo -n /usr/local/bin/femboy-install-backend "$CFG" >"$LOG" 2>&1; then
+      echo '100'; echo '# Installation complete.'
+      printf 'success' > /tmp/femboy-install.result
+    else
+      printf 'failed' > /tmp/femboy-install.result
+    fi
+  ) | zenity --progress --title="$TITLE" --width=600 --auto-close --no-cancel \
+      --percentage=0 --text='Installing Femboy Linux...'
+
+  rm -f "$CFG"
+  RESULT=$(cat /tmp/femboy-install.result 2>/dev/null || echo failed)
+  rm -f /tmp/femboy-install.result
+
+  if [[ "$RESULT" == success ]]; then
+    zenity --question --title="$TITLE" --width=520 --ok-label='Reboot now' --cancel-label='Stay here' \
+      --text='Femboy Linux was installed successfully. Remove/eject the installer ISO when the VM reboots.' \
+      && sudo reboot
+    exit 0
+  fi
+
+  tail -n 40 "$LOG" > /tmp/femboy-install-tail.log || true
+  error "Installation failed.\n\nThe last lines of the install log are available in:\n/tmp/femboy-install.log\n\nOpen xterm and run:\n  less /tmp/femboy-install.log"
+done
