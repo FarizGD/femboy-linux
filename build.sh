@@ -29,6 +29,9 @@ sort -u -o "$PROFILE/packages.x86_64" "$PROFILE/packages.x86_64"
 # Overlay our installer filesystem.
 cp -a "$ROOT/installer/airootfs/." "$PROFILE/airootfs/"
 
+# Install Femboy Linux command wrappers into the ISO filesystem.
+install -Dm755 "$ROOT/bin/apt" "$PROFILE/airootfs/usr/bin/apt"
+
 # Rebrand the current releng profile without replacing its current boot config.
 sed -i 's/^iso_name=.*/iso_name="femboy-linux"/' "$PROFILE/profiledef.sh"
 sed -i 's/^iso_label=.*/iso_label="FEMBOY_$(date +%Y%m)"/' "$PROFILE/profiledef.sh"
@@ -45,10 +48,11 @@ ln -sf /usr/lib/systemd/system/femboy-installer.service \
 ln -sf /usr/lib/systemd/system/graphical.target \
   "$PROFILE/airootfs/etc/systemd/system/default.target"
 
-# Ensure our launcher is executable in the generated image.
+# Ensure custom executables are executable in the generated image.
 cat >> "$PROFILE/profiledef.sh" <<'EOF'
 file_permissions+=(
   ["/usr/local/bin/femboy-installer"]="0:0:0755"
+  ["/usr/bin/apt"]="0:0:0755"
 )
 EOF
 
