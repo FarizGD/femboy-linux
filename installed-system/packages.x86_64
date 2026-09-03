@@ -1,0 +1,35 @@
+# Base system
+base
+linux
+linux-firmware
+sudo
+
+# Boot
+ grub
+efibootmgr
+
+# Networking
+networkmanager
+
+# Audio
+pipewire
+pipewire-alsa
+pipewire-pulse
+wireplumber
+
+# KDE Plasma 6
+plasma-meta
+sddm
+
+# Applications
+dolphin
+konsole
+kate
+ark
+spectacle
+firefox
+
+# Utilities
+nano
+vim
+git
