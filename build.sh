@@ -38,21 +38,18 @@ sed -i 's/^iso_label=.*/iso_label="FEMBOY_$(date +%Y%m)"/' "$PROFILE/profiledef.
 sed -i 's|^iso_publisher=.*|iso_publisher="Femboy Linux Project"|' "$PROFILE/profiledef.sh"
 sed -i 's|^iso_application=.*|iso_application="Femboy Linux Installer"|' "$PROFILE/profiledef.sh"
 
-# Enable the services needed by the installer environment.
+# Enable networking. tty1 autologin starts the graphical installer session.
 mkdir -p "$PROFILE/airootfs/etc/systemd/system/multi-user.target.wants"
-mkdir -p "$PROFILE/airootfs/etc/systemd/system/graphical.target.wants"
 ln -sf /usr/lib/systemd/system/NetworkManager.service \
   "$PROFILE/airootfs/etc/systemd/system/multi-user.target.wants/NetworkManager.service"
-ln -sf /usr/lib/systemd/system/femboy-installer.service \
-  "$PROFILE/airootfs/etc/systemd/system/graphical.target.wants/femboy-installer.service"
-ln -sf /usr/lib/systemd/system/graphical.target \
-  "$PROFILE/airootfs/etc/systemd/system/default.target"
 
-# Ensure custom executables are executable in the generated image.
+# Ensure custom files have the correct permissions in the generated image.
 cat >> "$PROFILE/profiledef.sh" <<'EOF'
 file_permissions+=(
   ["/usr/local/bin/femboy-installer"]="0:0:0755"
   ["/usr/bin/apt"]="0:0:0755"
+  ["/etc/skel/.xinitrc"]="0:0:0755"
+  ["/etc/sudoers.d/10-installer"]="0:0:0440"
 )
 EOF
 
