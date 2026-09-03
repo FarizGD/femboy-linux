@@ -31,6 +31,12 @@ install -Dm755 "$ROOT/bin/apt" "$PROFILE/airootfs/usr/bin/apt"
 install -Dm755 "$ROOT/bin/apt" "$PROFILE/airootfs/usr/share/femboy-linux/apt"
 install -Dm644 "$ROOT/installed-system/packages.x86_64" \
   "$PROFILE/airootfs/usr/share/femboy-linux/packages.x86_64"
+install -Dm755 "$ROOT/installed-system/install-wallpapers.sh" \
+  "$PROFILE/airootfs/usr/share/femboy-linux/install-wallpapers.sh"
+
+mkdir -p "$PROFILE/airootfs/usr/share/femboy-linux/rootfs"
+cp -a "$ROOT/installed-system/rootfs/." \
+  "$PROFILE/airootfs/usr/share/femboy-linux/rootfs/"
 
 if [[ -d "$ROOT/wallpapers" ]]; then
   mkdir -p "$PROFILE/airootfs/usr/share/femboy-linux/wallpapers"
