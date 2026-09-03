@@ -5,7 +5,7 @@ linux-firmware
 sudo
 
 # Boot
- grub
+grub
 efibootmgr
 
 # Networking
