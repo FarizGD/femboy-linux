@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v zenity >/dev/null 2>&1; then
+  zenity --info --title="Femboy Linux Installer" --width=520 --text="Femboy Linux installer environment is ready.\n\nCalamares is not bundled yet because it is not in the official Arch repositories. Open a terminal to continue development/testing."
+fi
+
+exec xterm -fa Monospace -fs 12 -title "Femboy Linux Installer" -e bash -lc '
+clear
+cat <<"EOF"
+Femboy Linux Installer
+======================
+
+Installer environment booted successfully.
+
+Current milestone:
+  [x] Bootable installer ISO
+  [x] Networking tools
+  [x] Disk/partition tools
+  [ ] Calamares package integration
+  [ ] Automated KDE Plasma installation
+  [ ] Bootloader + user configuration
+
+Repository: https://github.com/FarizGD/femboy-linux
+
+EOF
+exec bash
+'
