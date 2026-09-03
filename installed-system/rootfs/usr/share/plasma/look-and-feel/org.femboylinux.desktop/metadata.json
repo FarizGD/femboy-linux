@@ -1,0 +1,20 @@
+{
+  "KPackageStructure": "Plasma/LookAndFeel",
+  "KPlugin": {
+    "Authors": [
+      {
+        "Name": "Femboy Linux Project"
+      }
+    ],
+    "Category": "Plasma Look And Feel",
+    "Description": "Default Plasma appearance for Femboy Linux",
+    "EnabledByDefault": true,
+    "Id": "org.femboylinux.desktop",
+    "License": "GPL-3.0-or-later",
+    "Name": "Femboy Linux",
+    "ServiceTypes": [
+      "Plasma/LookAndFeel"
+    ],
+    "Version": "1.0"
+  }
+}
