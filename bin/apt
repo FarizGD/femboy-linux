@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Femboy Linux apt compatibility wrapper
+
+This is NOT Debian APT. It translates common apt commands to pacman.
+
+Supported commands:
+  apt update
+  apt upgrade
+  apt full-upgrade
+  apt install <packages...>
+  apt remove <packages...>
+  apt purge <packages...>
+  apt search <query...>
+  apt show <package...>
+  apt autoremove
+EOF
+}
+
+map_package() {
+  case "$1" in
+    build-essential) echo "base-devel" ;;
+    python3) echo "python" ;;
+    python3-pip) echo "python-pip" ;;
+    libssl-dev) echo "openssl" ;;
+    pkg-config) echo "pkgconf" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+cmd="${1:-}"
+[[ -n "$cmd" ]] || { usage; exit 1; }
+shift || true
+
+case "$cmd" in
+  update)
+    echo "[femboy-apt] Arch does not support Debian-style partial upgrades."
+    echo "[femboy-apt] Refreshing and upgrading together with: pacman -Syu"
+    exec pacman -Syu
+    ;;
+
+  upgrade|full-upgrade)
+    exec pacman -Syu
+    ;;
+
+  install)
+    [[ $# -gt 0 ]] || { echo "apt install: missing package name" >&2; exit 2; }
+    pkgs=()
+    for pkg in "$@"; do
+      pkgs+=("$(map_package "$pkg")")
+    done
+    exec pacman -S "${pkgs[@]}"
+    ;;
+
+  remove|purge)
+    [[ $# -gt 0 ]] || { echo "apt $cmd: missing package name" >&2; exit 2; }
+    pkgs=()
+    for pkg in "$@"; do
+      pkgs+=("$(map_package "$pkg")")
+    done
+    exec pacman -Rns "${pkgs[@]}"
+    ;;
+
+  search)
+    [[ $# -gt 0 ]] || { echo "apt search: missing search term" >&2; exit 2; }
+    exec pacman -Ss "$@"
+    ;;
+
+  show)
+    [[ $# -gt 0 ]] || { echo "apt show: missing package name" >&2; exit 2; }
+    pkgs=()
+    for pkg in "$@"; do
+      pkgs+=("$(map_package "$pkg")")
+    done
+    exec pacman -Si "${pkgs[@]}"
+    ;;
+
+  autoremove)
+    mapfile -t orphans < <(pacman -Qdtq || true)
+    if ((${#orphans[@]} == 0)); then
+      echo "No packages to autoremove."
+      exit 0
+    fi
+    exec pacman -Rns "${orphans[@]}"
+    ;;
+
+  -h|--help|help)
+    usage
+    ;;
+
+  *)
+    echo "Unsupported apt command: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
