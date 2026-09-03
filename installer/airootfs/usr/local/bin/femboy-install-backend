@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ $EUID -eq 0 ]] || { echo "backend must run as root" >&2; exit 1; }
+[[ $# -eq 1 && -f "$1" ]] || { echo "usage: femboy-install-backend CONFIG" >&2; exit 1; }
+
+# shellcheck disable=SC1090
+source "$1"
+
+: "${DISK:?}" "${HOSTNAME:?}" "${USERNAME:?}" "${PASSWORD:?}" "${TIMEZONE:?}"
+[[ "$DISK" == /dev/* && -b "$DISK" ]] || { echo "Invalid disk: $DISK" >&2; exit 1; }
+[[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "Invalid username" >&2; exit 1; }
+[[ "$HOSTNAME" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || { echo "Invalid hostname" >&2; exit 1; }
+[[ -e "/usr/share/zoneinfo/$TIMEZONE" ]] || { echo "Invalid timezone: $TIMEZONE" >&2; exit 1; }
+
+part() {
+  if [[ "$DISK" =~ [0-9]$ ]]; then printf '%sp%s' "$DISK" "$1"; else printf '%s%s' "$DISK" "$1"; fi
+}
+
+cleanup() {
+  sync || true
+  umount -R /mnt 2>/dev/null || true
+}
+trap cleanup EXIT
+
+umount -R /mnt 2>/dev/null || true
+wipefs -af "$DISK"
+parted -s "$DISK" mklabel gpt
+
+if [[ -d /sys/firmware/efi ]]; then
+  MODE=uefi
+  parted -s "$DISK" mkpart ESP fat32 1MiB 513MiB
+  parted -s "$DISK" set 1 esp on
+  parted -s "$DISK" mkpart ROOT ext4 513MiB 100%
+  ESP="$(part 1)"
+  ROOT="$(part 2)"
+  partprobe "$DISK"
+  udevadm settle
+  mkfs.fat -F32 "$ESP"
+else
+  MODE=bios
+  parted -s "$DISK" mkpart BIOS 1MiB 3MiB
+  parted -s "$DISK" set 1 bios_grub on
+  parted -s "$DISK" mkpart ROOT ext4 3MiB 100%
+  ROOT="$(part 2)"
+  partprobe "$DISK"
+  udevadm settle
+fi
+
+mkfs.ext4 -F "$ROOT"
+mount "$ROOT" /mnt
+if [[ "$MODE" == uefi ]]; then
+  mkdir -p /mnt/boot/efi
+  mount "$ESP" /mnt/boot/efi
+fi
+
+PKGFILE=/usr/share/femboy-linux/packages.x86_64
+[[ -f "$PKGFILE" ]] || { echo "Missing installed-system package list" >&2; exit 1; }
+mapfile -t PKGS < <(sed 's/#.*//' "$PKGFILE" | awk 'NF')
+pacstrap -K /mnt "${PKGS[@]}"
+genfstab -U /mnt >> /mnt/etc/fstab
+
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" /mnt/etc/localtime
+arch-chroot /mnt hwclock --systohc
+sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /mnt/etc/locale.gen
+arch-chroot /mnt locale-gen
+printf 'LANG=en_US.UTF-8\n' > /mnt/etc/locale.conf
+printf '%s\n' "$HOSTNAME" > /mnt/etc/hostname
+cat > /mnt/etc/hosts <<EOF
+127.0.0.1 localhost
+::1 localhost
+127.0.1.1 ${HOSTNAME}.localdomain ${HOSTNAME}
+EOF
+
+arch-chroot /mnt useradd -m -G wheel -s /bin/bash "$USERNAME"
+printf '%s:%s\n' "$USERNAME" "$PASSWORD" | arch-chroot /mnt chpasswd
+arch-chroot /mnt passwd -l root
+install -Dm440 /dev/stdin /mnt/etc/sudoers.d/10-wheel <<'EOF'
+%wheel ALL=(ALL:ALL) ALL
+EOF
+
+arch-chroot /mnt systemctl enable NetworkManager.service
+arch-chroot /mnt systemctl enable sddm.service
+
+if [[ "$MODE" == uefi ]]; then
+  arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id='Femboy Linux'
+else
+  arch-chroot /mnt grub-install --target=i386-pc "$DISK"
+fi
+arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+
+# Femboy Linux compatibility wrapper and branding assets bundled in the ISO.
+if [[ -f /usr/share/femboy-linux/apt ]]; then
+  install -Dm755 /usr/share/femboy-linux/apt /mnt/usr/bin/apt
+  ln -sf apt /mnt/usr/bin/apt-get
+fi
+
+if [[ -d /usr/share/femboy-linux/wallpapers ]]; then
+  mkdir -p /mnt/usr/share/femboy-linux/wallpapers
+  cp -a /usr/share/femboy-linux/wallpapers/. /mnt/usr/share/femboy-linux/wallpapers/
+fi
+
+if [[ -d /usr/share/femboy-linux/plasma ]]; then
+  cp -a /usr/share/femboy-linux/plasma/. /mnt/
+fi
+
+sync
+trap - EXIT
+cleanup
