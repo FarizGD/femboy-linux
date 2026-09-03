@@ -1,0 +1,9 @@
+NAME="Femboy Linux Installer"
+PRETTY_NAME="Femboy Linux Installer"
+ID=femboy-linux-installer
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="38;2;255;105;180"
+HOME_URL="https://github.com/FarizGD/femboy-linux"
+DOCUMENTATION_URL="https://github.com/FarizGD/femboy-linux"
+BUG_REPORT_URL="https://github.com/FarizGD/femboy-linux/issues"
