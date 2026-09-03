@@ -22,33 +22,51 @@ rm -f "$OUT"/*.iso "$OUT"/*.sha256 2>/dev/null || true
 
 cp -a /usr/share/archiso/configs/releng/. "$PROFILE/"
 
-# Add our installer packages to the current releng package set.
 cat "$ROOT/installer/packages.x86_64" >> "$PROFILE/packages.x86_64"
 sort -u -o "$PROFILE/packages.x86_64" "$PROFILE/packages.x86_64"
-
-# Overlay our installer filesystem.
 cp -a "$ROOT/installer/airootfs/." "$PROFILE/airootfs/"
 
-# Install Femboy Linux command wrappers into the ISO filesystem.
+# Payload used by the installer to build the installed system.
 install -Dm755 "$ROOT/bin/apt" "$PROFILE/airootfs/usr/bin/apt"
+install -Dm755 "$ROOT/bin/apt" "$PROFILE/airootfs/usr/share/femboy-linux/apt"
+install -Dm644 "$ROOT/installed-system/packages.x86_64" \
+  "$PROFILE/airootfs/usr/share/femboy-linux/packages.x86_64"
 
-# Rebrand the current releng profile without replacing its current boot config.
+if [[ -d "$ROOT/wallpapers" ]]; then
+  mkdir -p "$PROFILE/airootfs/usr/share/femboy-linux/wallpapers"
+  cp -a "$ROOT/wallpapers/." "$PROFILE/airootfs/usr/share/femboy-linux/wallpapers/"
+fi
+
+# Create the dedicated graphical installer account in the live image.
+mkdir -p "$PROFILE/airootfs/home/installer"
+cp -a "$PROFILE/airootfs/etc/skel/." "$PROFILE/airootfs/home/installer/"
+grep -q '^installer:' "$PROFILE/airootfs/etc/passwd" || \
+  echo 'installer:x:1000:1000:Femboy Linux Installer:/home/installer:/bin/bash' >> "$PROFILE/airootfs/etc/passwd"
+grep -q '^installer:' "$PROFILE/airootfs/etc/group" || \
+  echo 'installer:x:1000:' >> "$PROFILE/airootfs/etc/group"
+grep -q '^installer:' "$PROFILE/airootfs/etc/shadow" || \
+  echo 'installer:!:1::::::' >> "$PROFILE/airootfs/etc/shadow"
+grep -q '^installer:' "$PROFILE/airootfs/etc/gshadow" || \
+  echo 'installer:!::' >> "$PROFILE/airootfs/etc/gshadow"
+
 sed -i 's/^iso_name=.*/iso_name="femboy-linux"/' "$PROFILE/profiledef.sh"
 sed -i 's/^iso_label=.*/iso_label="FEMBOY_$(date +%Y%m)"/' "$PROFILE/profiledef.sh"
 sed -i 's|^iso_publisher=.*|iso_publisher="Femboy Linux Project"|' "$PROFILE/profiledef.sh"
 sed -i 's|^iso_application=.*|iso_application="Femboy Linux Installer"|' "$PROFILE/profiledef.sh"
 
-# Enable networking. tty1 autologin starts the graphical installer session.
 mkdir -p "$PROFILE/airootfs/etc/systemd/system/multi-user.target.wants"
 ln -sf /usr/lib/systemd/system/NetworkManager.service \
   "$PROFILE/airootfs/etc/systemd/system/multi-user.target.wants/NetworkManager.service"
 
-# Ensure custom files have the correct permissions in the generated image.
 cat >> "$PROFILE/profiledef.sh" <<'EOF'
 file_permissions+=(
   ["/usr/local/bin/femboy-installer"]="0:0:0755"
+  ["/usr/local/bin/femboy-install-backend"]="0:0:0755"
   ["/usr/bin/apt"]="0:0:0755"
   ["/etc/skel/.xinitrc"]="0:0:0755"
+  ["/home/installer"]="1000:1000:0755"
+  ["/home/installer/.bash_profile"]="1000:1000:0644"
+  ["/home/installer/.xinitrc"]="1000:1000:0755"
   ["/etc/sudoers.d/10-installer"]="0:0:0440"
 )
 EOF
@@ -57,5 +75,4 @@ mkarchiso -v -r -w "$WORK" -o "$OUT" "$PROFILE"
 
 ISO="$(find "$OUT" -maxdepth 1 -type f -name '*.iso' | head -n1)"
 sha256sum "$ISO" > "$ISO.sha256"
-
 echo "Built: $ISO"
