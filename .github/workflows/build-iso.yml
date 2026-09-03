@@ -1,0 +1,51 @@
+name: Build Femboy Linux ISO
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'build.sh'
+      - 'installer/**'
+      - 'installed-system/**'
+      - '.github/workflows/build-iso.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed archiso git rsync sudo
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build ISO
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Show output
+        run: |
+          ls -lah out
+          sha256sum out/*.iso
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: femboy-linux-iso
+          path: |
+            out/*.iso
+            out/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
