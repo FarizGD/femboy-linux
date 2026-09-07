@@ -2,7 +2,7 @@
 Type=Application
 Name=Femboy Linux Installer
 Comment=Install Femboy Linux to this computer
-Exec=/usr/local/bin/femboy-installer
+Exec=/usr/local/bin/femboy-live-session
 Icon=system-software-install
 Terminal=false
 X-KDE-autostart-after=panel
