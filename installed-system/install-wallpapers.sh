@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$ROOT/wallpapers"
+# Source can be overridden by the installer backend. When run directly from the
+# repository, wallpapers live one directory above installed-system/.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SRC="${WALLPAPER_SRC:-$SCRIPT_DIR/../wallpapers}"
 DEST="${DESTDIR:-}/usr/share/wallpapers/FemboyLinux"
 
 install_wallpaper() {
@@ -17,8 +19,6 @@ install_wallpaper() {
     return 1
   }
 
-  # Plasma discovers packaged wallpapers through metadata.json. Merely putting
-  # an image under contents/images is not enough for it to appear in Settings.
   install -Dm644 "$SRC/$file" "$dir/contents/images/$size.webp"
 
   mkdir -p "$dir"
