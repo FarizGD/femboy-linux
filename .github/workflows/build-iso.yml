@@ -30,6 +30,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Mark checkout as a safe Git repository
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Build ISO
         run: |
           chmod +x build.sh
@@ -43,6 +47,7 @@ jobs:
       - name: Publish ISO to rolling release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
