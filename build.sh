@@ -75,6 +75,7 @@ cat >> "$PROFILE/profiledef.sh" <<'EOF'
 file_permissions+=(
   ["/usr/local/bin/femboy-installer"]="0:0:0755"
   ["/usr/local/bin/femboy-install-backend"]="0:0:0755"
+  ["/usr/local/bin/femboy-partitioner"]="0:0:0755"
   ["/usr/bin/apt"]="0:0:0755"
   ["/home/installer"]="1000:1000:0755"
   ["/home/installer/.bash_profile"]="1000:1000:0644"
