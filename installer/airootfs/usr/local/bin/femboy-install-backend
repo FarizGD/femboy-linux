@@ -8,12 +8,24 @@ set -euo pipefail
 source "$1"
 
 : "${DISK:?}" "${HOSTNAME:?}" "${USERNAME:?}" "${PASSWORD:?}" "${TIMEZONE:?}"
+PARTITION_MODE="${PARTITION_MODE:-erase}"
+ROOT_PART="${ROOT_PART:-}"
+ESP_PART="${ESP_PART:-}"
+FORMAT_ROOT="${FORMAT_ROOT:-yes}"
+FORMAT_ESP="${FORMAT_ESP:-no}"
+LOCALE="${LOCALE:-en_US.UTF-8}"
+KEYMAP="${KEYMAP:-us}"
+FULLNAME="${FULLNAME:-}"
+
 [[ "$DISK" == /dev/* && -b "$DISK" ]] || { echo "Invalid disk: $DISK" >&2; exit 1; }
+[[ "$PARTITION_MODE" =~ ^(erase|alongside|manual)$ ]] || { echo "Invalid partition mode" >&2; exit 1; }
 [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "Invalid username" >&2; exit 1; }
 [[ "$HOSTNAME" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || { echo "Invalid hostname" >&2; exit 1; }
 [[ -e "/usr/share/zoneinfo/$TIMEZONE" ]] || { echo "Invalid timezone: $TIMEZONE" >&2; exit 1; }
 
-part() {
+stage() { printf '\n[FEMBOY-STAGE] %s\n' "$*"; }
+
+part_path() {
   if [[ "$DISK" =~ [0-9]$ ]]; then printf '%sp%s' "$DISK" "$1"; else printf '%s%s' "$DISK" "$1"; fi
 }
 
@@ -23,48 +35,149 @@ cleanup() {
 }
 trap cleanup EXIT
 
+new_partition_after() {
+  local before="$1" after
+  partprobe "$DISK" || true
+  udevadm settle
+  after="$(lsblk -lnpo NAME "$DISK" | tail -n +2 | sort)"
+  comm -13 <(printf '%s\n' "$before" | sed '/^$/d' | sort) <(printf '%s\n' "$after" | sed '/^$/d' | sort) | head -n1
+}
+
+largest_free_region() {
+  parted -sm "$DISK" unit MiB print free | awk -F: '
+    /:free;$/ {
+      s=$2; e=$3; z=$4;
+      gsub(/MiB/,"",s); gsub(/MiB/,"",e); gsub(/MiB/,"",z);
+      if ((z+0) > max) { max=z+0; start=s+0; end=e+0 }
+    }
+    END { if (max > 0) printf "%.3f %.3f %.3f\n", start, end, max }
+  '
+}
+
+find_esp() {
+  lsblk -rno NAME,PARTTYPE "$DISK" | awk 'tolower($2)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {print $1; exit}'
+}
+
+find_bios_boot() {
+  lsblk -rno NAME,PARTTYPE "$DISK" | awk 'tolower($2)=="21686148-6449-6e6f-744e-656564454649" {print $1; exit}'
+}
+
 umount -R /mnt 2>/dev/null || true
-wipefs -af "$DISK"
-parted -s "$DISK" mklabel gpt
+MODE=bios
+[[ -d /sys/firmware/efi ]] && MODE=uefi
 
-if [[ -d /sys/firmware/efi ]]; then
-  MODE=uefi
-  parted -s "$DISK" mkpart ESP fat32 1MiB 513MiB
-  parted -s "$DISK" set 1 esp on
-  parted -s "$DISK" mkpart ROOT ext4 513MiB 100%
-  ESP="$(part 1)"
-  ROOT="$(part 2)"
-  partprobe "$DISK"
-  udevadm settle
-  mkfs.fat -F32 "$ESP"
-else
-  MODE=bios
-  parted -s "$DISK" mkpart BIOS 1MiB 3MiB
-  parted -s "$DISK" set 1 bios_grub on
-  parted -s "$DISK" mkpart ROOT ext4 3MiB 100%
-  ROOT="$(part 2)"
-  partprobe "$DISK"
-  udevadm settle
-fi
+stage "Preparing partitions"
+case "$PARTITION_MODE" in
+  erase)
+    wipefs -af "$DISK"
+    parted -s "$DISK" mklabel gpt
+    if [[ "$MODE" == uefi ]]; then
+      parted -s "$DISK" mkpart ESP fat32 1MiB 513MiB
+      parted -s "$DISK" set 1 esp on
+      parted -s "$DISK" mkpart ROOT ext4 513MiB 100%
+      ESP_PART="$(part_path 1)"
+      ROOT_PART="$(part_path 2)"
+      partprobe "$DISK"; udevadm settle
+      mkfs.fat -F32 "$ESP_PART"
+    else
+      parted -s "$DISK" mkpart BIOS 1MiB 3MiB
+      parted -s "$DISK" set 1 bios_grub on
+      parted -s "$DISK" mkpart ROOT ext4 3MiB 100%
+      ROOT_PART="$(part_path 2)"
+      partprobe "$DISK"; udevadm settle
+    fi
+    mkfs.ext4 -F "$ROOT_PART"
+    ;;
 
-mkfs.ext4 -F "$ROOT"
-mount "$ROOT" /mnt
+  alongside)
+    read -r FREE_START FREE_END FREE_SIZE < <(largest_free_region || true)
+    [[ -n "${FREE_SIZE:-}" ]] || { echo "No unallocated disk space was found on $DISK" >&2; exit 20; }
+
+    # Reserve enough room for the installed system and, when needed, a boot partition.
+    MIN_MIB=8192
+    (( ${FREE_SIZE%.*} >= MIN_MIB )) || { echo "Largest unallocated region is only ${FREE_SIZE} MiB; at least ${MIN_MIB} MiB is required" >&2; exit 21; }
+
+    CURSOR="$FREE_START"
+    if [[ "$MODE" == uefi ]]; then
+      ESP_PART="$(find_esp || true)"
+      if [[ -z "$ESP_PART" ]]; then
+        before="$(lsblk -lnpo NAME "$DISK" | tail -n +2 | sort)"
+        ESP_END="$(awk -v x="$CURSOR" 'BEGIN { printf "%.3f", x+512 }')"
+        parted -s "$DISK" unit MiB mkpart ESP fat32 "${CURSOR}MiB" "${ESP_END}MiB"
+        ESP_PART="$(new_partition_after "$before")"
+        [[ -n "$ESP_PART" ]] || { echo "Could not identify newly-created EFI partition" >&2; exit 22; }
+        parted -s "$DISK" set "$(lsblk -no PARTN "$ESP_PART")" esp on
+        mkfs.fat -F32 "$ESP_PART"
+        CURSOR="$ESP_END"
+      fi
+    else
+      TABLE="$(parted -sm "$DISK" print | awk -F: 'NR==2 {gsub(/;$/, "", $6); print $6}')"
+      if [[ "$TABLE" == gpt && -z "$(find_bios_boot || true)" ]]; then
+        before="$(lsblk -lnpo NAME "$DISK" | tail -n +2 | sort)"
+        BIOS_END="$(awk -v x="$CURSOR" 'BEGIN { printf "%.3f", x+2 }')"
+        parted -s "$DISK" unit MiB mkpart BIOS "${CURSOR}MiB" "${BIOS_END}MiB"
+        BIOS_PART="$(new_partition_after "$before")"
+        [[ -n "$BIOS_PART" ]] || { echo "Could not identify newly-created BIOS boot partition" >&2; exit 23; }
+        parted -s "$DISK" set "$(lsblk -no PARTN "$BIOS_PART")" bios_grub on
+        CURSOR="$BIOS_END"
+      fi
+    fi
+
+    before="$(lsblk -lnpo NAME "$DISK" | tail -n +2 | sort)"
+    # Leave 2 MiB of breathing room at the end for partition alignment metadata.
+    ROOT_END="$(awk -v x="$FREE_END" 'BEGIN { printf "%.3f", x-2 }')"
+    parted -s "$DISK" unit MiB mkpart FEMBOY ext4 "${CURSOR}MiB" "${ROOT_END}MiB"
+    ROOT_PART="$(new_partition_after "$before")"
+    [[ -n "$ROOT_PART" ]] || { echo "Could not identify newly-created root partition" >&2; exit 24; }
+    mkfs.ext4 -F "$ROOT_PART"
+    ;;
+
+  manual)
+    [[ "$ROOT_PART" == /dev/* && -b "$ROOT_PART" ]] || { echo "Invalid manual root partition: $ROOT_PART" >&2; exit 30; }
+    if [[ "$FORMAT_ROOT" == yes ]]; then
+      mkfs.ext4 -F "$ROOT_PART"
+    else
+      ROOT_FS="$(lsblk -no FSTYPE "$ROOT_PART" | head -n1)"
+      [[ "$ROOT_FS" == ext4 ]] || { echo "Manual root partition must be ext4 when 'format root' is disabled (found: ${ROOT_FS:-unknown})" >&2; exit 31; }
+    fi
+    if [[ "$MODE" == uefi ]]; then
+      [[ "$ESP_PART" == /dev/* && -b "$ESP_PART" ]] || { echo "UEFI installation requires an EFI System Partition" >&2; exit 32; }
+      if [[ "$FORMAT_ESP" == yes ]]; then
+        mkfs.fat -F32 "$ESP_PART"
+      else
+        ESP_FS="$(lsblk -no FSTYPE "$ESP_PART" | head -n1)"
+        [[ "$ESP_FS" =~ ^(vfat|fat|fat32)$ ]] || { echo "Selected EFI partition is not FAT (found: ${ESP_FS:-unknown})" >&2; exit 33; }
+      fi
+    fi
+    ;;
+esac
+
+stage "Mounting target system"
+mount "$ROOT_PART" /mnt
 if [[ "$MODE" == uefi ]]; then
   mkdir -p /mnt/boot/efi
-  mount "$ESP" /mnt/boot/efi
+  mount "$ESP_PART" /mnt/boot/efi
 fi
 
+stage "Installing base system and KDE Plasma"
 PKGFILE=/usr/share/femboy-linux/packages.x86_64
 [[ -f "$PKGFILE" ]] || { echo "Missing installed-system package list" >&2; exit 1; }
 mapfile -t PKGS < <(sed 's/#.*//' "$PKGFILE" | awk 'NF')
 pacstrap -K /mnt "${PKGS[@]}"
-genfstab -U /mnt >> /mnt/etc/fstab
+genfstab -U /mnt > /mnt/etc/fstab
 
+stage "Configuring system"
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" /mnt/etc/localtime
 arch-chroot /mnt hwclock --systohc
-sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /mnt/etc/locale.gen
+
+case "$LOCALE" in
+  id_ID.UTF-8) LOCALE_LINE='id_ID.UTF-8 UTF-8' ;;
+  *) LOCALE='en_US.UTF-8'; LOCALE_LINE='en_US.UTF-8 UTF-8' ;;
+esac
+sed -i "s/^#${LOCALE_LINE}/${LOCALE_LINE}/" /mnt/etc/locale.gen
 arch-chroot /mnt locale-gen
-printf 'LANG=en_US.UTF-8\n' > /mnt/etc/locale.conf
+printf 'LANG=%s\n' "$LOCALE" > /mnt/etc/locale.conf
+printf 'KEYMAP=%s\n' "$KEYMAP" > /mnt/etc/vconsole.conf
 printf '%s\n' "$HOSTNAME" > /mnt/etc/hostname
 cat > /mnt/etc/hosts <<EOF
 127.0.0.1 localhost
@@ -72,16 +185,23 @@ cat > /mnt/etc/hosts <<EOF
 127.0.1.1 ${HOSTNAME}.localdomain ${HOSTNAME}
 EOF
 
-arch-chroot /mnt useradd -m -G wheel -s /bin/bash "$USERNAME"
+stage "Creating user account"
+if [[ -n "$FULLNAME" ]]; then
+  arch-chroot /mnt useradd -m -G wheel -s /bin/bash -c "$FULLNAME" "$USERNAME"
+else
+  arch-chroot /mnt useradd -m -G wheel -s /bin/bash "$USERNAME"
+fi
 printf '%s:%s\n' "$USERNAME" "$PASSWORD" | arch-chroot /mnt chpasswd
 arch-chroot /mnt passwd -l root
-install -Dm440 /dev/stdin /mnt/etc/sudoers.d/10-wheel <<'EOF'
-%wheel ALL=(ALL:ALL) ALL
-EOF
+mkdir -p /mnt/etc/sudoers.d
+printf '%%wheel ALL=(ALL:ALL) ALL\n' > /mnt/etc/sudoers.d/10-wheel
+chmod 440 /mnt/etc/sudoers.d/10-wheel
 
+stage "Enabling services"
 arch-chroot /mnt systemctl enable NetworkManager.service
 arch-chroot /mnt systemctl enable sddm.service
 
+stage "Installing bootloader"
 if [[ "$MODE" == uefi ]]; then
   arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id='Femboy Linux'
 else
@@ -89,7 +209,7 @@ else
 fi
 arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
 
-# Distro payload bundled into the installer ISO.
+stage "Applying Femboy Linux branding"
 if [[ -f /usr/share/femboy-linux/apt ]]; then
   install -Dm755 /usr/share/femboy-linux/apt /mnt/usr/bin/apt
   ln -sf apt /mnt/usr/bin/apt-get
@@ -111,6 +231,7 @@ if [[ -d /usr/share/femboy-linux/wallpapers ]]; then
   fi
 fi
 
+stage "Finishing installation"
 sync
 trap - EXIT
 cleanup
