@@ -92,11 +92,8 @@ case "$PARTITION_MODE" in
   alongside)
     read -r FREE_START FREE_END FREE_SIZE < <(largest_free_region || true)
     [[ -n "${FREE_SIZE:-}" ]] || { echo "No unallocated disk space was found on $DISK" >&2; exit 20; }
-
-    # Reserve enough room for the installed system and, when needed, a boot partition.
     MIN_MIB=8192
     (( ${FREE_SIZE%.*} >= MIN_MIB )) || { echo "Largest unallocated region is only ${FREE_SIZE} MiB; at least ${MIN_MIB} MiB is required" >&2; exit 21; }
-
     CURSOR="$FREE_START"
     if [[ "$MODE" == uefi ]]; then
       ESP_PART="$(find_esp || true)"
@@ -122,9 +119,7 @@ case "$PARTITION_MODE" in
         CURSOR="$BIOS_END"
       fi
     fi
-
     before="$(lsblk -lnpo NAME "$DISK" | tail -n +2 | sort)"
-    # Leave 2 MiB of breathing room at the end for partition alignment metadata.
     ROOT_END="$(awk -v x="$FREE_END" 'BEGIN { printf "%.3f", x-2 }')"
     parted -s "$DISK" unit MiB mkpart FEMBOY ext4 "${CURSOR}MiB" "${ROOT_END}MiB"
     ROOT_PART="$(new_partition_after "$before")"
@@ -169,7 +164,6 @@ genfstab -U /mnt > /mnt/etc/fstab
 stage "Configuring system"
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" /mnt/etc/localtime
 arch-chroot /mnt hwclock --systohc
-
 case "$LOCALE" in
   id_ID.UTF-8) LOCALE_LINE='id_ID.UTF-8 UTF-8' ;;
   *) LOCALE='en_US.UTF-8'; LOCALE_LINE='en_US.UTF-8 UTF-8' ;;
@@ -219,16 +213,13 @@ if [[ -d /usr/share/femboy-linux/rootfs ]]; then
   cp -a /usr/share/femboy-linux/rootfs/. /mnt/
 fi
 
-if [[ -d /usr/share/femboy-linux/wallpapers ]]; then
-  mkdir -p /usr/share/femboy-linux/runtime-wallpapers
-  cp -a /usr/share/femboy-linux/wallpapers/. /usr/share/femboy-linux/runtime-wallpapers/
-  if [[ -x /usr/share/femboy-linux/install-wallpapers.sh ]]; then
-    mkdir -p /tmp/femboy-wallpaper-payload
-    ln -sfn /usr/share/femboy-linux/runtime-wallpapers /tmp/femboy-wallpaper-payload/wallpapers
-    cp /usr/share/femboy-linux/install-wallpapers.sh /tmp/femboy-wallpaper-payload/install-wallpapers.sh
-    DESTDIR=/mnt bash /tmp/femboy-wallpaper-payload/install-wallpapers.sh || true
-    rm -rf /tmp/femboy-wallpaper-payload /usr/share/femboy-linux/runtime-wallpapers
-  fi
+# Install the bundled wallpapers into the actual KDE system wallpaper path.
+# The old temporary-payload approach made the helper resolve /tmp/wallpapers,
+# so the script silently skipped every image.
+if [[ -d /usr/share/femboy-linux/wallpapers && -x /usr/share/femboy-linux/install-wallpapers.sh ]]; then
+  WALLPAPER_SRC=/usr/share/femboy-linux/wallpapers \
+    DESTDIR=/mnt \
+    bash /usr/share/femboy-linux/install-wallpapers.sh
 fi
 
 stage "Finishing installation"
