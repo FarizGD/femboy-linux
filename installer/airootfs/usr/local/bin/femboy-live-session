@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 set -u
 
-WALLPAPER='/usr/share/femboy-linux/wallpapers/night-rooftop.webp'
+WALLPAPER='/usr/share/wallpapers/FemboyLinux/night-rooftop/contents/images/2048x1152.webp'
 
-# The live Plasma session has its own user configuration. The installed-system
-# look-and-feel defaults do not configure this disposable installer session.
+# Apply the packaged Femboy Linux wallpaper to the disposable live Plasma session.
 if [[ -f "$WALLPAPER" ]]; then
-  # Give plasmashell a moment to create the default containment, then replace
-  # its wallpaper through Plasma's scripting API.
   for _ in {1..20}; do
     if qdbus6 org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript \
       "var ds = desktops(); for (var i = 0; i < ds.length; i++) { ds[i].wallpaperPlugin = 'org.kde.image'; ds[i].currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General']; ds[i].writeConfig('Image', 'file://$WALLPAPER'); }" \
