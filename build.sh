@@ -41,6 +41,32 @@ cp -a "$ROOT/installed-system/rootfs/." \
 if [[ -d "$ROOT/wallpapers" ]]; then
   mkdir -p "$PROFILE/airootfs/usr/share/femboy-linux/wallpapers"
   cp -a "$ROOT/wallpapers/." "$PROFILE/airootfs/usr/share/femboy-linux/wallpapers/"
+
+  # Also install the wallpapers as proper KDE wallpaper packages in the LIVE ISO.
+  install_live_wallpaper() {
+    local id="$1" title="$2" file="$3" size="$4"
+    local dest="$PROFILE/airootfs/usr/share/wallpapers/FemboyLinux/$id"
+    [[ -f "$ROOT/wallpapers/$file" ]] || return 0
+    install -Dm644 "$ROOT/wallpapers/$file" "$dest/contents/images/$size.webp"
+    mkdir -p "$dest"
+    cat > "$dest/metadata.json" <<EOF
+{
+  "KPlugin": {
+    "Id": "org.femboylinux.wallpaper.$id",
+    "Name": "$title",
+    "Description": "Femboy Linux wallpaper",
+    "Version": "1.0",
+    "License": "CC0-1.0"
+  },
+  "KPackageStructure": "Plasma/Wallpaper"
+}
+EOF
+  }
+
+  install_live_wallpaper whale-girl "Whale Girl" whale-girl.webp 2048x1448
+  install_live_wallpaper arch-anime "Arch Anime" arch-anime.webp 2048x1152
+  install_live_wallpaper debian-anime "Debian Anime" debian-anime.webp 1920x1080
+  install_live_wallpaper night-rooftop "Night Rooftop" night-rooftop.webp 2048x1152
 fi
 
 # Dedicated live installer account. An empty password lets SDDM accept the
