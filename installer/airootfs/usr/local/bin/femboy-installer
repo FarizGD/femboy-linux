@@ -1,78 +1,229 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python3
+import os
+import re
+import shlex
+import subprocess
+import tempfile
+from pathlib import Path
 
-TITLE='Femboy Linux Installer'
+from PyQt6.QtCore import QProcess, Qt, QTimer
+from PyQt6.QtGui import QFont, QPixmap
+from PyQt6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QProgressBar, QPushButton, QRadioButton, QStackedWidget, QVBoxLayout, QWidget
+)
 
-error() { zenity --error --title="$TITLE" --width=520 --text="$1"; }
-info() { zenity --info --title="$TITLE" --width=520 --text="$1"; }
+TITLE = "Install Femboy Linux"
+BG = "/usr/share/femboy-linux/wallpapers/night-rooftop.webp"
+LOG = "/tmp/femboy-install.log"
 
-command -v zenity >/dev/null || { echo 'zenity missing'; exit 1; }
 
-while true; do
-  mapfile -t DISKS < <(lsblk -dpno NAME,SIZE,MODEL,TYPE | awk '$NF=="disk" {type=$NF; $NF=""; sub(/[[:space:]]+$/,""); print}')
-  ((${#DISKS[@]})) || { error 'No installable disks were detected.'; exit 1; }
+def disks():
+    out = subprocess.check_output(["lsblk", "-dpno", "NAME,SIZE,MODEL,TYPE"], text=True)
+    result = []
+    for line in out.splitlines():
+        parts = line.split()
+        if parts and parts[-1] == "disk":
+            result.append((parts[0], " ".join(parts[1:-1]) or "Disk"))
+    return result
 
-  rows=()
-  for row in "${DISKS[@]}"; do
-    dev="${row%% *}"
-    desc="${row#* }"
-    rows+=("$dev" "$desc")
-  done
 
-  DISK=$(zenity --list --title="$TITLE — Select disk" --width=760 --height=420 \
-    --text='Choose the disk to install Femboy Linux onto. THIS DISK WILL BE ERASED.' \
-    --column='Device' --column='Size / Model' "${rows[@]}") || exit 0
-  [[ -n "$DISK" ]] || continue
+class Installer(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(TITLE)
+        self.resize(1100, 700)
+        self.setMinimumSize(900, 600)
+        self.cfg = None
+        self.process = None
+        self.installing = False
+        self.pages = []
+        self.page_names = ["Welcome", "Language", "Keyboard", "Network", "Installation", "Account", "Location", "Summary", "Installing", "Finished"]
+        self.build_ui()
+        self.apply_style()
+        self.show_page(0)
 
-  HOSTNAME=$(zenity --entry --title="$TITLE — Computer name" --text='Computer name:' --entry-text='femboy-linux') || exit 0
-  USERNAME=$(zenity --entry --title="$TITLE — User" --text='Username:' --entry-text='user') || exit 0
-  PASSWORD=$(zenity --password --title="$TITLE — Password" --text="Password for $USERNAME:") || exit 0
-  PASSWORD2=$(zenity --password --title="$TITLE — Confirm password" --text='Enter the password again:') || exit 0
-  [[ "$PASSWORD" == "$PASSWORD2" ]] || { error 'The passwords do not match.'; continue; }
-  [[ -n "$PASSWORD" ]] || { error 'Password cannot be empty.'; continue; }
+    def apply_style(self):
+        self.setStyleSheet("""
+            QMainWindow, QWidget { background: #111318; color: #f5f5f5; font-size: 14px; }
+            #sidebar { background: rgba(15,17,22,235); border-right: 1px solid #333842; }
+            #card { background: rgba(24,27,34,242); border: 1px solid #3b414d; border-radius: 14px; }
+            #hero { border-radius: 14px; }
+            QLabel#title { font-size: 30px; font-weight: 700; }
+            QLabel#subtitle { color: #b9bec9; font-size: 15px; }
+            QListWidget { background: transparent; border: 0; outline: 0; }
+            QListWidget::item { padding: 12px 14px; margin: 2px 0; border-radius: 8px; color: #aeb4c0; }
+            QListWidget::item:selected { background: #7c5cff; color: white; font-weight: 600; }
+            QLineEdit, QComboBox { background: #20242c; border: 1px solid #454c59; border-radius: 7px; padding: 9px; min-height: 22px; }
+            QPushButton { background: #7c5cff; border: 0; border-radius: 8px; padding: 10px 22px; font-weight: 600; }
+            QPushButton:hover { background: #9278ff; }
+            QPushButton:disabled { background: #3a3d45; color: #777c86; }
+            QPushButton#secondary { background: #2a2e37; border: 1px solid #454c59; }
+            QProgressBar { border: 1px solid #444a55; border-radius: 7px; background: #20242c; text-align: center; min-height: 18px; }
+            QProgressBar::chunk { background: #7c5cff; border-radius: 6px; }
+            QRadioButton, QCheckBox { spacing: 9px; padding: 6px; }
+        """)
 
-  TIMEZONE=$(zenity --entry --title="$TITLE — Time zone" \
-    --text='IANA timezone (examples: UTC, Asia/Jakarta, Europe/London):' --entry-text='UTC') || exit 0
+    def build_ui(self):
+        root = QWidget(); self.setCentralWidget(root)
+        outer = QHBoxLayout(root); outer.setContentsMargins(0,0,0,0); outer.setSpacing(0)
+        self.sidebar = QListWidget(); self.sidebar.setObjectName("sidebar"); self.sidebar.setFixedWidth(230); self.sidebar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for name in self.page_names:
+            self.sidebar.addItem(QListWidgetItem(name))
+        self.sidebar.setEnabled(False); outer.addWidget(self.sidebar)
 
-  SUMMARY="Disk: $DISK\nHostname: $HOSTNAME\nUser: $USERNAME\nTimezone: $TIMEZONE\n\nALL DATA ON $DISK WILL BE ERASED."
-  zenity --question --title="$TITLE — Confirm installation" --width=560 \
-    --ok-label='ERASE DISK AND INSTALL' --cancel-label='Go back' --text="$SUMMARY" || continue
+        right = QWidget(); rv = QVBoxLayout(right); rv.setContentsMargins(42,32,42,28); rv.setSpacing(20)
+        self.stack = QStackedWidget(); rv.addWidget(self.stack, 1)
+        nav = QHBoxLayout(); self.back = QPushButton("Back"); self.back.setObjectName("secondary"); self.back.clicked.connect(self.prev_page)
+        self.next = QPushButton("Next"); self.next.clicked.connect(self.next_page)
+        nav.addWidget(self.back); nav.addStretch(); nav.addWidget(self.next); rv.addLayout(nav); outer.addWidget(right,1)
 
-  CFG=$(mktemp /tmp/femboy-install.XXXXXX)
-  chmod 600 "$CFG"
-  {
-    printf 'DISK=%q\n' "$DISK"
-    printf 'HOSTNAME=%q\n' "$HOSTNAME"
-    printf 'USERNAME=%q\n' "$USERNAME"
-    printf 'PASSWORD=%q\n' "$PASSWORD"
-    printf 'TIMEZONE=%q\n' "$TIMEZONE"
-  } > "$CFG"
+        self.welcome_page(); self.language_page(); self.keyboard_page(); self.network_page(); self.disk_page(); self.account_page(); self.location_page(); self.summary_page(); self.progress_page(); self.finished_page()
 
-  LOG=/tmp/femboy-install.log
-  : > "$LOG"
+    def page(self, title, subtitle):
+        w = QWidget(); v = QVBoxLayout(w); v.setSpacing(16)
+        t = QLabel(title); t.setObjectName("title"); v.addWidget(t)
+        s = QLabel(subtitle); s.setObjectName("subtitle"); s.setWordWrap(True); v.addWidget(s)
+        card = QFrame(); card.setObjectName("card"); cv = QVBoxLayout(card); cv.setContentsMargins(24,24,24,24); cv.setSpacing(14); v.addWidget(card,1)
+        self.stack.addWidget(w); self.pages.append(w); return cv
 
-  (
-    echo '5'; echo '# Preparing disk...'
-    if sudo -n /usr/local/bin/femboy-install-backend "$CFG" >"$LOG" 2>&1; then
-      echo '100'; echo '# Installation complete.'
-      printf 'success' > /tmp/femboy-install.result
-    else
-      printf 'failed' > /tmp/femboy-install.result
-    fi
-  ) | zenity --progress --title="$TITLE" --width=600 --auto-close --no-cancel \
-      --percentage=0 --text='Installing Femboy Linux...'
+    def welcome_page(self):
+        v = self.page("Welcome to Femboy Linux", "A friendly Arch-based system with KDE Plasma 6. This wizard will guide you through the installation.")
+        if Path(BG).exists():
+            img = QLabel(); img.setObjectName("hero"); pix = QPixmap(BG); img.setPixmap(pix.scaled(760,360,Qt.AspectRatioMode.KeepAspectRatioByExpanding,Qt.TransformationMode.SmoothTransformation)); img.setMaximumHeight(360); img.setAlignment(Qt.AlignmentFlag.AlignCenter); v.addWidget(img)
+        h = QLabel("Ready to make this computer yours?\n\nYou can review every choice before the installer erases or changes any disk."); h.setWordWrap(True); v.addWidget(h); v.addStretch()
 
-  rm -f "$CFG"
-  RESULT=$(cat /tmp/femboy-install.result 2>/dev/null || echo failed)
-  rm -f /tmp/femboy-install.result
+    def language_page(self):
+        v = self.page("Choose your language", "Select the language used by the installed system.")
+        self.language = QComboBox(); self.language.addItems(["English (United States)", "Bahasa Indonesia"]); v.addWidget(self.language); v.addStretch()
 
-  if [[ "$RESULT" == success ]]; then
-    zenity --question --title="$TITLE" --width=520 --ok-label='Reboot now' --cancel-label='Stay here' \
-      --text='Femboy Linux was installed successfully. Remove/eject the installer ISO when the VM reboots.' \
-      && sudo reboot
-    exit 0
-  fi
+    def keyboard_page(self):
+        v = self.page("Keyboard layout", "Choose a keyboard layout. More layouts can be configured later in KDE System Settings.")
+        self.keyboard = QComboBox(); self.keyboard.addItems(["English (US)", "English (UK)", "Indonesian"]); v.addWidget(self.keyboard); v.addStretch()
 
-  tail -n 40 "$LOG" > /tmp/femboy-install-tail.log || true
-  error "Installation failed.\n\nThe last lines of the install log are available in:\n/tmp/femboy-install.log\n\nOpen xterm and run:\n  less /tmp/femboy-install.log"
-done
+    def network_page(self):
+        v = self.page("Connect to the internet", "An internet connection is required because the installer downloads current Arch Linux packages.")
+        self.net = QLabel(); self.refresh_network(); v.addWidget(self.net)
+        b = QPushButton("Refresh connection status"); b.setObjectName("secondary"); b.clicked.connect(self.refresh_network); v.addWidget(b)
+        n = QPushButton("Open NetworkManager (nmtui)"); n.setObjectName("secondary"); n.clicked.connect(lambda: subprocess.Popen(["xterm","-e","nmtui"])); v.addWidget(n); v.addStretch()
+
+    def refresh_network(self):
+        ok = subprocess.run(["systemctl","is-active","--quiet","NetworkManager"], check=False).returncode == 0
+        try:
+            online = subprocess.run(["ping","-c","1","-W","2","archlinux.org"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        except FileNotFoundError:
+            online = False
+        self.net.setText(("✓ Internet connection detected" if online else "⚠ No internet connection detected") + ("\nNetworkManager is running." if ok else "\nNetworkManager is not running."))
+
+    def disk_page(self):
+        v = self.page("Installation type", "Choose where Femboy Linux should be installed. Automatic installation currently uses the whole selected disk.")
+        self.erase = QRadioButton("Erase disk and install Femboy Linux"); self.erase.setChecked(True); v.addWidget(self.erase)
+        self.manual = QRadioButton("Manual partitioning with GParted"); v.addWidget(self.manual)
+        g = QPushButton("Open GParted"); g.setObjectName("secondary"); g.clicked.connect(lambda: subprocess.Popen(["sudo","-n","gparted"])); v.addWidget(g)
+        self.disk = QComboBox();
+        for dev, desc in disks(): self.disk.addItem(f"{dev}    {desc}", dev)
+        v.addWidget(QLabel("Target disk:")); v.addWidget(self.disk)
+        warn = QLabel("⚠ Erase disk deletes ALL data on the selected disk. You will get one final confirmation before installation starts."); warn.setWordWrap(True); v.addWidget(warn); v.addStretch()
+
+    def account_page(self):
+        v = self.page("Who are you?", "Create the main user account for your Femboy Linux installation.")
+        form = QFormLayout(); self.fullname=QLineEdit(); self.username=QLineEdit("user"); self.hostname=QLineEdit("femboy-linux"); self.password=QLineEdit(); self.password.setEchoMode(QLineEdit.EchoMode.Password); self.password2=QLineEdit(); self.password2.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Your name",self.fullname); form.addRow("Username",self.username); form.addRow("Computer name",self.hostname); form.addRow("Password",self.password); form.addRow("Confirm password",self.password2); v.addLayout(form); v.addStretch()
+
+    def location_page(self):
+        v = self.page("Where are you?", "Choose your timezone. This controls the system clock and local time.")
+        self.timezone=QComboBox(); self.timezone.setEditable(True); self.timezone.addItems(["Asia/Jakarta","Asia/Makassar","Asia/Jayapura","UTC","Europe/London","America/New_York","Asia/Tokyo"]); v.addWidget(self.timezone); v.addStretch()
+
+    def summary_page(self):
+        v = self.page("Ready to install", "Review your choices carefully. Nothing is erased until you press Install now.")
+        self.summary=QLabel(); self.summary.setWordWrap(True); self.summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); v.addWidget(self.summary); v.addStretch()
+
+    def progress_page(self):
+        v = self.page("Installing Femboy Linux", "You can keep watching while the installer prepares your new system.")
+        self.stage=QLabel("Preparing installation..."); self.stage.setObjectName("title"); v.addWidget(self.stage)
+        self.progress=QProgressBar(); self.progress.setRange(0,0); v.addWidget(self.progress)
+        self.loghint=QLabel("Detailed log: /tmp/femboy-install.log"); self.loghint.setObjectName("subtitle"); v.addWidget(self.loghint); v.addStretch()
+
+    def finished_page(self):
+        v = self.page("Installation complete", "Femboy Linux is ready. Remove the installer ISO when the virtual machine restarts.")
+        done=QLabel("✓ Welcome to Femboy Linux\n\nYour system, KDE Plasma desktop, bootloader and user account have been installed."); done.setWordWrap(True); v.addWidget(done); v.addStretch()
+
+    def show_page(self, i):
+        self.stack.setCurrentIndex(i); self.sidebar.setCurrentRow(i)
+        self.back.setVisible(i not in (0,8,9)); self.next.setVisible(i not in (8,))
+        if i == 0: self.next.setText("Start installation")
+        elif i == 7: self.next.setText("Install now")
+        elif i == 9: self.next.setText("Restart now")
+        else: self.next.setText("Next")
+        if i == 7: self.update_summary()
+
+    def prev_page(self): self.show_page(max(0,self.stack.currentIndex()-1))
+
+    def next_page(self):
+        i=self.stack.currentIndex()
+        if i==4 and self.manual.isChecked():
+            QMessageBox.information(self,TITLE,"Use GParted to prepare partitions. The automatic backend does not yet consume a custom partition map, so select Erase disk to continue this installer safely."); return
+        if i==5 and not self.validate_account(): return
+        if i==6 and not Path("/usr/share/zoneinfo",self.timezone.currentText().strip()).exists():
+            QMessageBox.warning(self,TITLE,"That timezone was not found. Use an IANA timezone such as Asia/Jakarta."); return
+        if i==7: self.start_install(); return
+        if i==9:
+            subprocess.Popen(["sudo","-n","reboot"]); return
+        self.show_page(min(9,i+1))
+
+    def validate_account(self):
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]*",self.username.text()):
+            QMessageBox.warning(self,TITLE,"Username must start with a lowercase letter or underscore and contain only lowercase letters, numbers, _ or -."); return False
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*",self.hostname.text()):
+            QMessageBox.warning(self,TITLE,"Computer name contains invalid characters."); return False
+        if not self.password.text() or self.password.text()!=self.password2.text():
+            QMessageBox.warning(self,TITLE,"Passwords are empty or do not match."); return False
+        return True
+
+    def update_summary(self):
+        self.summary.setText(f"<b>Language:</b> {self.language.currentText()}<br><b>Keyboard:</b> {self.keyboard.currentText()}<br><b>Target disk:</b> {self.disk.currentData()}<br><b>Installation:</b> Erase disk and install<br><b>User:</b> {self.username.text()}<br><b>Computer name:</b> {self.hostname.text()}<br><b>Timezone:</b> {self.timezone.currentText()}<br><br><b style='color:#ff9b9b'>ALL DATA ON {self.disk.currentData()} WILL BE ERASED.</b>")
+
+    def start_install(self):
+        disk=self.disk.currentData()
+        if not disk:
+            QMessageBox.critical(self,TITLE,"No target disk is selected."); return
+        answer=QMessageBox.question(self,TITLE,"This is the final confirmation.\n\nALL DATA on %s will be erased.\n\nContinue?"%disk,QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+        if answer!=QMessageBox.StandardButton.Yes: return
+        fd,path=tempfile.mkstemp(prefix="femboy-install.",dir="/tmp",text=True); os.close(fd); os.chmod(path,0o600); self.cfg=path
+        vals={"DISK":disk,"HOSTNAME":self.hostname.text(),"USERNAME":self.username.text(),"PASSWORD":self.password.text(),"TIMEZONE":self.timezone.currentText().strip()}
+        with open(path,"w") as f:
+            for k,v in vals.items(): f.write(f"{k}={shlex.quote(v)}\n")
+        Path(LOG).write_text(""); self.installing=True; self.show_page(8); self.back.hide(); self.next.hide()
+        self.process=QProcess(self); self.process.setProgram("sudo"); self.process.setArguments(["-n","/usr/local/bin/femboy-install-backend",path]); self.process.setStandardOutputFile(LOG,QProcess.OpenModeFlag.Append); self.process.setStandardErrorFile(LOG,QProcess.OpenModeFlag.Append); self.process.finished.connect(self.install_finished); self.process.start()
+        self.timer=QTimer(self); self.timer.timeout.connect(self.guess_stage); self.timer.start(1000)
+
+    def guess_stage(self):
+        try: text=Path(LOG).read_text(errors="replace")[-16000:]
+        except OSError: return
+        stage="Preparing disk and filesystems..."
+        if "Synchronizing package databases" in text or "Packages (" in text: stage="Downloading and installing the system..."
+        if "Generating locales" in text or "locale-gen" in text: stage="Configuring language and system settings..."
+        if "Created symlink" in text: stage="Enabling system services..."
+        if "Installing for" in text: stage="Installing the GRUB bootloader..."
+        if "Generating grub configuration" in text: stage="Generating boot configuration..."
+        if "Adding boot menu entry" in text or "Found initrd image" in text: stage="Applying Femboy Linux branding and wallpapers..."
+        self.stage.setText(stage)
+
+    def install_finished(self,code,status):
+        self.timer.stop(); self.installing=False
+        if self.cfg:
+            try: os.unlink(self.cfg)
+            except OSError: pass
+        if code==0:
+            self.progress.setRange(0,100); self.progress.setValue(100); self.show_page(9)
+        else:
+            try: tail="\n".join(Path(LOG).read_text(errors="replace").splitlines()[-20:])
+            except OSError: tail="Unable to read installer log."
+            QMessageBox.critical(self,TITLE,"Installation failed.\n\nLast log lines:\n"+tail+"\n\nFull log: "+LOG); self.show_page(7)
+
+
+app=QApplication([])
+app.setApplicationName("Femboy Linux Installer")
+app.setFont(QFont("Noto Sans",10))
+w=Installer(); w.showMaximized(); app.exec()
