@@ -3,7 +3,8 @@ xorg-server
 xorg-xinit
 openbox
 xterm
-zenity
+python
+python-pyqt6
 mesa
 networkmanager
 
@@ -30,7 +31,5 @@ git
 nano
 sudo
 
-# NOTE:
-# Calamares is intentionally not listed here because it is not currently in the
-# official Arch repositories. The first installer milestone uses the repository's
-# own launcher and can later bundle Calamares from a maintained package source.
+# The installer UI is a native PyQt6 application. python-pyqt6 is available
+# from Arch's official Extra repository, so the live ISO needs no AUR packages.
