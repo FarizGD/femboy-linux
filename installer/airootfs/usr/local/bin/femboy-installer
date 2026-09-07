@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import re
 import shlex
@@ -7,20 +8,29 @@ import tempfile
 from pathlib import Path
 
 from PyQt6.QtCore import QProcess, Qt, QTimer
-from PyQt6.QtGui import QFont, QPixmap
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QRadioButton, QStackedWidget, QVBoxLayout, QWidget
+    QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QMessageBox, QProgressBar, QPushButton, QRadioButton, QStackedWidget,
+    QVBoxLayout, QWidget
 )
 
 TITLE = "Install Femboy Linux"
 BG = "/usr/share/femboy-linux/wallpapers/night-rooftop.webp"
 LOG = "/tmp/femboy-install.log"
+UEFI = Path("/sys/firmware/efi").exists()
+
+
+def run_text(args):
+    try:
+        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
 
 
 def disks():
-    out = subprocess.check_output(["lsblk", "-dpno", "NAME,SIZE,MODEL,TYPE"], text=True)
+    out = run_text(["lsblk", "-dpno", "NAME,SIZE,MODEL,TYPE"])
     result = []
     for line in out.splitlines():
         parts = line.split()
@@ -29,17 +39,52 @@ def disks():
     return result
 
 
+def partitions_for_disk(disk):
+    try:
+        raw = subprocess.check_output(
+            ["lsblk", "-Jp", "-o", "NAME,SIZE,FSTYPE,TYPE,MOUNTPOINTS,PARTTYPE", disk],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        tree = json.loads(raw).get("blockdevices", [])
+    except Exception:
+        return []
+    result = []
+    for dev in tree:
+        for child in dev.get("children") or []:
+            if child.get("type") == "part":
+                result.append(child)
+    return result
+
+
+def largest_free_space(disk):
+    out = run_text(["parted", "-sm", disk, "unit", "GiB", "print", "free"])
+    best = 0.0
+    for line in out.splitlines():
+        if not line.endswith(":free;"):
+            continue
+        fields = line.rstrip(";").split(":")
+        if len(fields) >= 5:
+            try:
+                size = float(fields[3].replace("GiB", ""))
+                best = max(best, size)
+            except ValueError:
+                pass
+    return best
+
+
 class Installer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(TITLE)
-        self.resize(1100, 700)
-        self.setMinimumSize(900, 600)
+        self.resize(1180, 760)
+        self.setMinimumSize(980, 650)
         self.cfg = None
         self.process = None
         self.installing = False
-        self.pages = []
-        self.page_names = ["Welcome", "Language", "Keyboard", "Network", "Installation", "Account", "Location", "Summary", "Installing", "Finished"]
+        self.page_names = [
+            "Welcome", "Language", "Keyboard", "Network", "Installation type",
+            "Account", "Location", "Summary", "Installing", "Finished"
+        ]
         self.build_ui()
         self.apply_style()
         self.show_page(0)
@@ -47,11 +92,11 @@ class Installer(QMainWindow):
     def apply_style(self):
         self.setStyleSheet("""
             QMainWindow, QWidget { background: #111318; color: #f5f5f5; font-size: 14px; }
-            #sidebar { background: rgba(15,17,22,235); border-right: 1px solid #333842; }
-            #card { background: rgba(24,27,34,242); border: 1px solid #3b414d; border-radius: 14px; }
-            #hero { border-radius: 14px; }
+            #sidebar { background: rgba(15,17,22,242); border-right: 1px solid #333842; }
+            #card { background: rgba(24,27,34,246); border: 1px solid #3b414d; border-radius: 14px; }
             QLabel#title { font-size: 30px; font-weight: 700; }
             QLabel#subtitle { color: #b9bec9; font-size: 15px; }
+            QLabel#warning { color: #ffb4b4; }
             QListWidget { background: transparent; border: 0; outline: 0; }
             QListWidget::item { padding: 12px 14px; margin: 2px 0; border-radius: 8px; color: #aeb4c0; }
             QListWidget::item:selected { background: #7c5cff; color: white; font-weight: 600; }
@@ -63,167 +108,290 @@ class Installer(QMainWindow):
             QProgressBar { border: 1px solid #444a55; border-radius: 7px; background: #20242c; text-align: center; min-height: 18px; }
             QProgressBar::chunk { background: #7c5cff; border-radius: 6px; }
             QRadioButton, QCheckBox { spacing: 9px; padding: 6px; }
+            QGroupBox { border: 1px solid #454c59; border-radius: 10px; margin-top: 12px; padding: 16px; font-weight: 600; }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
         """)
 
     def build_ui(self):
         root = QWidget(); self.setCentralWidget(root)
-        outer = QHBoxLayout(root); outer.setContentsMargins(0,0,0,0); outer.setSpacing(0)
-        self.sidebar = QListWidget(); self.sidebar.setObjectName("sidebar"); self.sidebar.setFixedWidth(230); self.sidebar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        outer = QHBoxLayout(root); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        self.sidebar = QListWidget(); self.sidebar.setObjectName("sidebar"); self.sidebar.setFixedWidth(240)
+        self.sidebar.setFocusPolicy(Qt.FocusPolicy.NoFocus); self.sidebar.setEnabled(False)
         for name in self.page_names:
             self.sidebar.addItem(QListWidgetItem(name))
-        self.sidebar.setEnabled(False); outer.addWidget(self.sidebar)
+        outer.addWidget(self.sidebar)
 
-        right = QWidget(); rv = QVBoxLayout(right); rv.setContentsMargins(42,32,42,28); rv.setSpacing(20)
+        right = QWidget(); rv = QVBoxLayout(right); rv.setContentsMargins(42, 32, 42, 28); rv.setSpacing(20)
         self.stack = QStackedWidget(); rv.addWidget(self.stack, 1)
-        nav = QHBoxLayout(); self.back = QPushButton("Back"); self.back.setObjectName("secondary"); self.back.clicked.connect(self.prev_page)
+        nav = QHBoxLayout()
+        self.back = QPushButton("Back"); self.back.setObjectName("secondary"); self.back.clicked.connect(self.prev_page)
         self.next = QPushButton("Next"); self.next.clicked.connect(self.next_page)
-        nav.addWidget(self.back); nav.addStretch(); nav.addWidget(self.next); rv.addLayout(nav); outer.addWidget(right,1)
+        nav.addWidget(self.back); nav.addStretch(); nav.addWidget(self.next); rv.addLayout(nav)
+        outer.addWidget(right, 1)
 
-        self.welcome_page(); self.language_page(); self.keyboard_page(); self.network_page(); self.disk_page(); self.account_page(); self.location_page(); self.summary_page(); self.progress_page(); self.finished_page()
+        self.welcome_page(); self.language_page(); self.keyboard_page(); self.network_page()
+        self.disk_page(); self.account_page(); self.location_page(); self.summary_page()
+        self.progress_page(); self.finished_page()
 
     def page(self, title, subtitle):
         w = QWidget(); v = QVBoxLayout(w); v.setSpacing(16)
         t = QLabel(title); t.setObjectName("title"); v.addWidget(t)
         s = QLabel(subtitle); s.setObjectName("subtitle"); s.setWordWrap(True); v.addWidget(s)
-        card = QFrame(); card.setObjectName("card"); cv = QVBoxLayout(card); cv.setContentsMargins(24,24,24,24); cv.setSpacing(14); v.addWidget(card,1)
-        self.stack.addWidget(w); self.pages.append(w); return cv
+        card = QFrame(); card.setObjectName("card"); cv = QVBoxLayout(card)
+        cv.setContentsMargins(24, 24, 24, 24); cv.setSpacing(14); v.addWidget(card, 1)
+        self.stack.addWidget(w); return cv
 
     def welcome_page(self):
-        v = self.page("Welcome to Femboy Linux", "A friendly Arch-based system with KDE Plasma 6. This wizard will guide you through the installation.")
+        v = self.page("Welcome to Femboy Linux", "Install an Arch-based KDE Plasma system with the options you want.")
         if Path(BG).exists():
-            img = QLabel(); img.setObjectName("hero"); pix = QPixmap(BG); img.setPixmap(pix.scaled(760,360,Qt.AspectRatioMode.KeepAspectRatioByExpanding,Qt.TransformationMode.SmoothTransformation)); img.setMaximumHeight(360); img.setAlignment(Qt.AlignmentFlag.AlignCenter); v.addWidget(img)
-        h = QLabel("Ready to make this computer yours?\n\nYou can review every choice before the installer erases or changes any disk."); h.setWordWrap(True); v.addWidget(h); v.addStretch()
+            img = QLabel(); pix = QPixmap(BG)
+            img.setPixmap(pix.scaled(820, 390, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation))
+            img.setMaximumHeight(390); img.setAlignment(Qt.AlignmentFlag.AlignCenter); v.addWidget(img)
+        text = QLabel("This installer supports installing beside an existing system, erasing a whole disk, or choosing partitions manually. Nothing is changed until the final confirmation.")
+        text.setWordWrap(True); v.addWidget(text); v.addStretch()
 
     def language_page(self):
         v = self.page("Choose your language", "Select the language used by the installed system.")
-        self.language = QComboBox(); self.language.addItems(["English (United States)", "Bahasa Indonesia"]); v.addWidget(self.language); v.addStretch()
+        self.language = QComboBox(); self.language.addItem("English (United States)", "en_US.UTF-8"); self.language.addItem("Bahasa Indonesia", "id_ID.UTF-8")
+        v.addWidget(self.language); v.addStretch()
 
     def keyboard_page(self):
-        v = self.page("Keyboard layout", "Choose a keyboard layout. More layouts can be configured later in KDE System Settings.")
-        self.keyboard = QComboBox(); self.keyboard.addItems(["English (US)", "English (UK)", "Indonesian"]); v.addWidget(self.keyboard); v.addStretch()
+        v = self.page("Keyboard layout", "Choose the keyboard layout for the installed system.")
+        self.keyboard = QComboBox(); self.keyboard.addItem("English (US)", "us"); self.keyboard.addItem("English (UK)", "uk"); self.keyboard.addItem("Indonesian", "us")
+        v.addWidget(self.keyboard); v.addStretch()
 
     def network_page(self):
-        v = self.page("Connect to the internet", "An internet connection is required because the installer downloads current Arch Linux packages.")
-        self.net = QLabel(); self.refresh_network(); v.addWidget(self.net)
-        b = QPushButton("Refresh connection status"); b.setObjectName("secondary"); b.clicked.connect(self.refresh_network); v.addWidget(b)
-        n = QPushButton("Open NetworkManager (nmtui)"); n.setObjectName("secondary"); n.clicked.connect(lambda: subprocess.Popen(["xterm","-e","nmtui"])); v.addWidget(n); v.addStretch()
+        v = self.page("Connect to the internet", "Internet access is required because the installer downloads current Arch Linux packages.")
+        self.net = QLabel(); v.addWidget(self.net); self.refresh_network()
+        h = QHBoxLayout()
+        b = QPushButton("Refresh"); b.setObjectName("secondary"); b.clicked.connect(self.refresh_network); h.addWidget(b)
+        n = QPushButton("Open NetworkManager"); n.setObjectName("secondary"); n.clicked.connect(lambda: subprocess.Popen(["konsole", "-e", "nmtui"])); h.addWidget(n)
+        h.addStretch(); v.addLayout(h); v.addStretch()
 
     def refresh_network(self):
-        ok = subprocess.run(["systemctl","is-active","--quiet","NetworkManager"], check=False).returncode == 0
-        try:
-            online = subprocess.run(["ping","-c","1","-W","2","archlinux.org"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-        except FileNotFoundError:
-            online = False
-        self.net.setText(("✓ Internet connection detected" if online else "⚠ No internet connection detected") + ("\nNetworkManager is running." if ok else "\nNetworkManager is not running."))
+        online = subprocess.run(["curl", "-fsS", "--connect-timeout", "4", "https://archlinux.org/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        self.net.setText("✓ Internet connection detected" if online else "⚠ No internet connection detected")
 
     def disk_page(self):
-        v = self.page("Installation type", "Choose where Femboy Linux should be installed. Automatic installation currently uses the whole selected disk.")
-        self.erase = QRadioButton("Erase disk and install Femboy Linux"); self.erase.setChecked(True); v.addWidget(self.erase)
-        self.manual = QRadioButton("Manual partitioning with GParted"); v.addWidget(self.manual)
-        g = QPushButton("Open GParted"); g.setObjectName("secondary"); g.clicked.connect(lambda: subprocess.Popen(["sudo","-n","gparted"])); v.addWidget(g)
-        self.disk = QComboBox();
+        v = self.page("Installation type", "Choose how Femboy Linux should use your storage.")
+        self.disk = QComboBox()
         for dev, desc in disks(): self.disk.addItem(f"{dev}    {desc}", dev)
+        self.disk.currentIndexChanged.connect(self.refresh_partition_ui)
         v.addWidget(QLabel("Target disk:")); v.addWidget(self.disk)
-        warn = QLabel("⚠ Erase disk deletes ALL data on the selected disk. You will get one final confirmation before installation starts."); warn.setWordWrap(True); v.addWidget(warn); v.addStretch()
+
+        self.alongside = QRadioButton("Guided partitioning: install into remaining unallocated space")
+        self.erase = QRadioButton("Guided partitioning: erase the entire disk")
+        self.manual = QRadioButton("Manual partitioning")
+        self.erase.setChecked(True)
+        for r in (self.alongside, self.erase, self.manual):
+            r.toggled.connect(self.partition_mode_changed); v.addWidget(r)
+
+        self.free_info = QLabel(); self.free_info.setWordWrap(True); v.addWidget(self.free_info)
+
+        self.manual_box = QGroupBox("Manual partition assignment")
+        mf = QFormLayout(self.manual_box)
+        self.root_part = QComboBox(); self.esp_part = QComboBox()
+        self.format_root = QCheckBox("Format root partition as ext4"); self.format_root.setChecked(True)
+        self.format_esp = QCheckBox("Format EFI partition as FAT32"); self.format_esp.setChecked(False)
+        mf.addRow("Root filesystem /", self.root_part); mf.addRow("", self.format_root)
+        self.esp_label = QLabel("EFI System Partition")
+        mf.addRow(self.esp_label, self.esp_part); mf.addRow("", self.format_esp)
+        self.gparted = QPushButton("Create / edit partitions with GParted"); self.gparted.setObjectName("secondary")
+        self.gparted.clicked.connect(self.open_gparted); mf.addRow(self.gparted)
+        v.addWidget(self.manual_box)
+
+        warn = QLabel("⚠ Erase-disk mode deletes every partition on the selected disk. Remaining-space mode preserves existing partitions and uses the largest unallocated region. Manual mode only formats partitions you explicitly mark for formatting.")
+        warn.setObjectName("warning"); warn.setWordWrap(True); v.addWidget(warn); v.addStretch()
+        self.partition_mode_changed(); self.refresh_partition_ui()
+
+    def open_gparted(self):
+        subprocess.Popen(["sudo", "-n", "gparted"])
+        QTimer.singleShot(1500, self.refresh_partition_ui)
+
+    def partition_mode_changed(self):
+        self.manual_box.setVisible(self.manual.isChecked())
+        self.free_info.setVisible(self.alongside.isChecked())
+        if self.alongside.isChecked(): self.refresh_partition_ui()
+
+    def refresh_partition_ui(self):
+        disk = self.disk.currentData()
+        self.root_part.clear(); self.esp_part.clear()
+        if not disk: return
+        parts = partitions_for_disk(disk)
+        for p in parts:
+            path = p.get("name", ""); size = p.get("size", "?"); fs = p.get("fstype") or "unformatted"; ptype = (p.get("parttype") or "").lower()
+            mounts = ", ".join(p.get("mountpoints") or [])
+            label = f"{path}    {size}    {fs}" + (f"    mounted: {mounts}" if mounts else "")
+            self.root_part.addItem(label, path)
+            if ptype == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" or fs in ("vfat", "fat", "fat32"):
+                self.esp_part.addItem(label, path)
+        self.esp_label.setVisible(UEFI); self.esp_part.setVisible(UEFI); self.format_esp.setVisible(UEFI)
+        free = largest_free_space(disk)
+        self.free_info.setText(f"Largest detected unallocated region: {free:.1f} GiB" if free else "No unallocated region detected. Shrink or delete a partition in GParted first.")
 
     def account_page(self):
-        v = self.page("Who are you?", "Create the main user account for your Femboy Linux installation.")
-        form = QFormLayout(); self.fullname=QLineEdit(); self.username=QLineEdit("user"); self.hostname=QLineEdit("femboy-linux"); self.password=QLineEdit(); self.password.setEchoMode(QLineEdit.EchoMode.Password); self.password2=QLineEdit(); self.password2.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow("Your name",self.fullname); form.addRow("Username",self.username); form.addRow("Computer name",self.hostname); form.addRow("Password",self.password); form.addRow("Confirm password",self.password2); v.addLayout(form); v.addStretch()
+        v = self.page("Who are you?", "Create the main user account.")
+        form = QFormLayout(); self.fullname = QLineEdit(); self.username = QLineEdit("user"); self.hostname = QLineEdit("femboy-linux")
+        self.password = QLineEdit(); self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password2 = QLineEdit(); self.password2.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Your name", self.fullname); form.addRow("Username", self.username); form.addRow("Computer name", self.hostname)
+        form.addRow("Password", self.password); form.addRow("Confirm password", self.password2); v.addLayout(form); v.addStretch()
 
     def location_page(self):
-        v = self.page("Where are you?", "Choose your timezone. This controls the system clock and local time.")
-        self.timezone=QComboBox(); self.timezone.setEditable(True); self.timezone.addItems(["Asia/Jakarta","Asia/Makassar","Asia/Jayapura","UTC","Europe/London","America/New_York","Asia/Tokyo"]); v.addWidget(self.timezone); v.addStretch()
+        v = self.page("Where are you?", "Choose your timezone.")
+        self.timezone = QComboBox(); self.timezone.setEditable(True)
+        self.timezone.addItems(["Asia/Jakarta", "Asia/Makassar", "Asia/Jayapura", "UTC", "Europe/London", "America/New_York", "Asia/Tokyo"])
+        v.addWidget(self.timezone); v.addStretch()
 
     def summary_page(self):
-        v = self.page("Ready to install", "Review your choices carefully. Nothing is erased until you press Install now.")
-        self.summary=QLabel(); self.summary.setWordWrap(True); self.summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); v.addWidget(self.summary); v.addStretch()
+        v = self.page("Ready to install", "Review everything carefully before installation begins.")
+        self.summary = QLabel(); self.summary.setWordWrap(True); self.summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(self.summary); v.addStretch()
 
     def progress_page(self):
-        v = self.page("Installing Femboy Linux", "You can keep watching while the installer prepares your new system.")
-        self.stage=QLabel("Preparing installation..."); self.stage.setObjectName("title"); v.addWidget(self.stage)
-        self.progress=QProgressBar(); self.progress.setRange(0,0); v.addWidget(self.progress)
-        self.loghint=QLabel("Detailed log: /tmp/femboy-install.log"); self.loghint.setObjectName("subtitle"); v.addWidget(self.loghint); v.addStretch()
+        v = self.page("Installing Femboy Linux", "Please keep this computer powered on while installation is in progress.")
+        self.stage = QLabel("Preparing installation..."); self.stage.setObjectName("title"); v.addWidget(self.stage)
+        self.progress = QProgressBar(); self.progress.setRange(0, 0); v.addWidget(self.progress)
+        hint = QLabel("Detailed log: /tmp/femboy-install.log"); hint.setObjectName("subtitle"); v.addWidget(hint); v.addStretch()
 
     def finished_page(self):
-        v = self.page("Installation complete", "Femboy Linux is ready. Remove the installer ISO when the virtual machine restarts.")
-        done=QLabel("✓ Welcome to Femboy Linux\n\nYour system, KDE Plasma desktop, bootloader and user account have been installed."); done.setWordWrap(True); v.addWidget(done); v.addStretch()
+        v = self.page("Installation complete", "Femboy Linux is ready to use.")
+        done = QLabel("✓ Installation completed successfully.\n\nRestart the computer and remove the installer ISO when prompted.")
+        done.setWordWrap(True); v.addWidget(done); v.addStretch()
 
     def show_page(self, i):
         self.stack.setCurrentIndex(i); self.sidebar.setCurrentRow(i)
-        self.back.setVisible(i not in (0,8,9)); self.next.setVisible(i not in (8,))
-        if i == 0: self.next.setText("Start installation")
+        self.back.setVisible(i not in (0, 8, 9)); self.next.setVisible(i != 8)
+        if i == 0: self.next.setText("Start")
         elif i == 7: self.next.setText("Install now")
         elif i == 9: self.next.setText("Restart now")
         else: self.next.setText("Next")
+        if i == 4: self.refresh_partition_ui()
         if i == 7: self.update_summary()
 
-    def prev_page(self): self.show_page(max(0,self.stack.currentIndex()-1))
+    def prev_page(self):
+        self.show_page(max(0, self.stack.currentIndex() - 1))
 
-    def next_page(self):
-        i=self.stack.currentIndex()
-        if i==4 and self.manual.isChecked():
-            QMessageBox.information(self,TITLE,"Use GParted to prepare partitions. The automatic backend does not yet consume a custom partition map, so select Erase disk to continue this installer safely."); return
-        if i==5 and not self.validate_account(): return
-        if i==6 and not Path("/usr/share/zoneinfo",self.timezone.currentText().strip()).exists():
-            QMessageBox.warning(self,TITLE,"That timezone was not found. Use an IANA timezone such as Asia/Jakarta."); return
-        if i==7: self.start_install(); return
-        if i==9:
-            subprocess.Popen(["sudo","-n","reboot"]); return
-        self.show_page(min(9,i+1))
-
-    def validate_account(self):
-        if not re.fullmatch(r"[a-z_][a-z0-9_-]*",self.username.text()):
-            QMessageBox.warning(self,TITLE,"Username must start with a lowercase letter or underscore and contain only lowercase letters, numbers, _ or -."); return False
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*",self.hostname.text()):
-            QMessageBox.warning(self,TITLE,"Computer name contains invalid characters."); return False
-        if not self.password.text() or self.password.text()!=self.password2.text():
-            QMessageBox.warning(self,TITLE,"Passwords are empty or do not match."); return False
+    def validate_partitioning(self):
+        if not self.disk.currentData():
+            QMessageBox.warning(self, TITLE, "Select a target disk."); return False
+        if self.alongside.isChecked():
+            free = largest_free_space(self.disk.currentData())
+            if free < 8:
+                QMessageBox.warning(self, TITLE, "Guided remaining-space installation needs at least 8 GiB of unallocated space. Use GParted to shrink an existing partition first."); return False
+        if self.manual.isChecked():
+            if not self.root_part.currentData():
+                QMessageBox.warning(self, TITLE, "Select a root partition for /."); return False
+            if UEFI and not self.esp_part.currentData():
+                QMessageBox.warning(self, TITLE, "UEFI boot requires an EFI System Partition."); return False
+            if UEFI and self.root_part.currentData() == self.esp_part.currentData():
+                QMessageBox.warning(self, TITLE, "Root and EFI must be different partitions."); return False
         return True
 
+    def validate_account(self):
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]*", self.username.text()):
+            QMessageBox.warning(self, TITLE, "Username must start with a lowercase letter or underscore and contain only lowercase letters, numbers, _ or -."); return False
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", self.hostname.text()):
+            QMessageBox.warning(self, TITLE, "Computer name contains invalid characters."); return False
+        if not self.password.text() or self.password.text() != self.password2.text():
+            QMessageBox.warning(self, TITLE, "Passwords are empty or do not match."); return False
+        return True
+
+    def next_page(self):
+        i = self.stack.currentIndex()
+        if i == 4 and not self.validate_partitioning(): return
+        if i == 5 and not self.validate_account(): return
+        if i == 6 and not Path("/usr/share/zoneinfo", self.timezone.currentText().strip()).exists():
+            QMessageBox.warning(self, TITLE, "That timezone was not found. Use an IANA timezone such as Asia/Jakarta."); return
+        if i == 7: self.start_install(); return
+        if i == 9:
+            subprocess.Popen(["sudo", "-n", "reboot"]); return
+        self.show_page(min(9, i + 1))
+
+    def partition_mode(self):
+        if self.alongside.isChecked(): return "alongside"
+        if self.manual.isChecked(): return "manual"
+        return "erase"
+
     def update_summary(self):
-        self.summary.setText(f"<b>Language:</b> {self.language.currentText()}<br><b>Keyboard:</b> {self.keyboard.currentText()}<br><b>Target disk:</b> {self.disk.currentData()}<br><b>Installation:</b> Erase disk and install<br><b>User:</b> {self.username.text()}<br><b>Computer name:</b> {self.hostname.text()}<br><b>Timezone:</b> {self.timezone.currentText()}<br><br><b style='color:#ff9b9b'>ALL DATA ON {self.disk.currentData()} WILL BE ERASED.</b>")
+        mode = self.partition_mode(); disk = self.disk.currentData()
+        if mode == "erase":
+            partition_html = f"<b>Partitioning:</b> Erase entire disk<br><b style='color:#ff9b9b'>ALL DATA ON {disk} WILL BE ERASED.</b>"
+        elif mode == "alongside":
+            partition_html = f"<b>Partitioning:</b> Install into the largest unallocated region on {disk}<br>Existing partitions will be preserved."
+        else:
+            partition_html = f"<b>Partitioning:</b> Manual<br><b>Root /:</b> {self.root_part.currentData()} ({'format ext4' if self.format_root.isChecked() else 'keep filesystem'})"
+            if UEFI:
+                partition_html += f"<br><b>EFI:</b> {self.esp_part.currentData()} ({'format FAT32' if self.format_esp.isChecked() else 'keep filesystem'})"
+        self.summary.setText(
+            f"<b>Language:</b> {self.language.currentText()}<br>"
+            f"<b>Keyboard:</b> {self.keyboard.currentText()}<br>"
+            f"<b>Target disk:</b> {disk}<br>{partition_html}<br><br>"
+            f"<b>User:</b> {self.username.text()}<br><b>Computer name:</b> {self.hostname.text()}<br>"
+            f"<b>Timezone:</b> {self.timezone.currentText()}"
+        )
 
     def start_install(self):
-        disk=self.disk.currentData()
-        if not disk:
-            QMessageBox.critical(self,TITLE,"No target disk is selected."); return
-        answer=QMessageBox.question(self,TITLE,"This is the final confirmation.\n\nALL DATA on %s will be erased.\n\nContinue?"%disk,QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
-        if answer!=QMessageBox.StandardButton.Yes: return
-        fd,path=tempfile.mkstemp(prefix="femboy-install.",dir="/tmp",text=True); os.close(fd); os.chmod(path,0o600); self.cfg=path
-        vals={"DISK":disk,"HOSTNAME":self.hostname.text(),"USERNAME":self.username.text(),"PASSWORD":self.password.text(),"TIMEZONE":self.timezone.currentText().strip()}
-        with open(path,"w") as f:
-            for k,v in vals.items(): f.write(f"{k}={shlex.quote(v)}\n")
-        Path(LOG).write_text(""); self.installing=True; self.show_page(8); self.back.hide(); self.next.hide()
-        self.process=QProcess(self); self.process.setProgram("sudo"); self.process.setArguments(["-n","/usr/local/bin/femboy-install-backend",path]); self.process.setStandardOutputFile(LOG,QProcess.OpenModeFlag.Append); self.process.setStandardErrorFile(LOG,QProcess.OpenModeFlag.Append); self.process.finished.connect(self.install_finished); self.process.start()
-        self.timer=QTimer(self); self.timer.timeout.connect(self.guess_stage); self.timer.start(1000)
+        if not self.validate_partitioning(): return
+        disk = self.disk.currentData(); mode = self.partition_mode()
+        if mode == "erase":
+            message = f"This is the final confirmation.\n\nEVERYTHING on {disk} will be erased.\n\nContinue?"
+        elif mode == "alongside":
+            message = f"Femboy Linux will create new partitions inside the largest unallocated region on {disk}. Existing partitions will be preserved.\n\nContinue?"
+        else:
+            message = f"Femboy Linux will install to {self.root_part.currentData()}. Only partitions marked for formatting will be formatted.\n\nContinue?"
+        answer = QMessageBox.question(self, TITLE, message, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes: return
 
-    def guess_stage(self):
-        try: text=Path(LOG).read_text(errors="replace")[-16000:]
+        fd, path = tempfile.mkstemp(prefix="femboy-install.", dir="/tmp", text=True); os.close(fd); os.chmod(path, 0o600); self.cfg = path
+        vals = {
+            "DISK": disk,
+            "PARTITION_MODE": mode,
+            "ROOT_PART": self.root_part.currentData() or "",
+            "ESP_PART": self.esp_part.currentData() or "",
+            "FORMAT_ROOT": "yes" if self.format_root.isChecked() else "no",
+            "FORMAT_ESP": "yes" if self.format_esp.isChecked() else "no",
+            "HOSTNAME": self.hostname.text(), "USERNAME": self.username.text(), "PASSWORD": self.password.text(),
+            "FULLNAME": self.fullname.text(), "TIMEZONE": self.timezone.currentText().strip(),
+            "LOCALE": self.language.currentData(), "KEYMAP": self.keyboard.currentData(),
+        }
+        with open(path, "w") as f:
+            for k, val in vals.items(): f.write(f"{k}={shlex.quote(str(val))}\n")
+
+        Path(LOG).write_text(""); self.installing = True; self.show_page(8); self.back.hide(); self.next.hide()
+        self.process = QProcess(self); self.process.setProgram("sudo")
+        self.process.setArguments(["-n", "/usr/local/bin/femboy-install-backend", path])
+        self.process.setStandardOutputFile(LOG, QProcess.OpenModeFlag.Append); self.process.setStandardErrorFile(LOG, QProcess.OpenModeFlag.Append)
+        self.process.finished.connect(self.install_finished); self.process.start()
+        self.timer = QTimer(self); self.timer.timeout.connect(self.update_stage); self.timer.start(700)
+
+    def update_stage(self):
+        try: text = Path(LOG).read_text(errors="replace")
         except OSError: return
-        stage="Preparing disk and filesystems..."
-        if "Synchronizing package databases" in text or "Packages (" in text: stage="Downloading and installing the system..."
-        if "Generating locales" in text or "locale-gen" in text: stage="Configuring language and system settings..."
-        if "Created symlink" in text: stage="Enabling system services..."
-        if "Installing for" in text: stage="Installing the GRUB bootloader..."
-        if "Generating grub configuration" in text: stage="Generating boot configuration..."
-        if "Adding boot menu entry" in text or "Found initrd image" in text: stage="Applying Femboy Linux branding and wallpapers..."
-        self.stage.setText(stage)
+        matches = re.findall(r"\[FEMBOY-STAGE\] (.+)", text)
+        if matches: self.stage.setText(matches[-1] + "...")
 
-    def install_finished(self,code,status):
-        self.timer.stop(); self.installing=False
+    def install_finished(self, code, status):
+        self.timer.stop(); self.installing = False
         if self.cfg:
             try: os.unlink(self.cfg)
             except OSError: pass
-        if code==0:
-            self.progress.setRange(0,100); self.progress.setValue(100); self.show_page(9)
+        if code == 0:
+            self.progress.setRange(0, 100); self.progress.setValue(100); self.show_page(9)
         else:
-            try: tail="\n".join(Path(LOG).read_text(errors="replace").splitlines()[-20:])
-            except OSError: tail="Unable to read installer log."
-            QMessageBox.critical(self,TITLE,"Installation failed.\n\nLast log lines:\n"+tail+"\n\nFull log: "+LOG); self.show_page(7)
+            try: tail = "\n".join(Path(LOG).read_text(errors="replace").splitlines()[-25:])
+            except OSError: tail = "Unable to read installer log."
+            QMessageBox.critical(self, TITLE, "Installation failed.\n\nLast log lines:\n" + tail + "\n\nFull log: " + LOG)
+            self.show_page(7)
+
+    def closeEvent(self, event):
+        if self.installing:
+            QMessageBox.warning(self, TITLE, "Installation is currently running. Wait for it to finish before closing the installer."); event.ignore(); return
+        event.accept()
 
 
-app=QApplication([])
+app = QApplication([])
 app.setApplicationName("Femboy Linux Installer")
-app.setFont(QFont("Noto Sans",10))
-w=Installer(); w.showMaximized(); app.exec()
+w = Installer()
+w.showMaximized()
+app.exec()
