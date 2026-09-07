@@ -1,8 +1,12 @@
-# Graphical installer environment
+# KDE Plasma live installer environment
 xorg-server
-xorg-xinit
-openbox
-xterm
+xorg-xwayland
+plasma-desktop
+plasma-workspace
+plasma-nm
+sddm
+breeze
+konsole
 python
 python-pyqt6
 mesa
@@ -31,5 +35,5 @@ git
 nano
 sudo
 
-# The installer UI is a native PyQt6 application. python-pyqt6 is available
-# from Arch's official Extra repository, so the live ISO needs no AUR packages.
+# The live ISO uses KDE Plasma with SDDM instead of the old Openbox/startx shell.
+# The installer UI itself is a native PyQt6 application.
