@@ -43,7 +43,8 @@ if [[ -d "$ROOT/wallpapers" ]]; then
   cp -a "$ROOT/wallpapers/." "$PROFILE/airootfs/usr/share/femboy-linux/wallpapers/"
 fi
 
-# Create the dedicated graphical installer account in the live image.
+# Dedicated live installer account. An empty password lets SDDM accept the
+# account by pressing Enter; this applies only to the disposable live ISO.
 mkdir -p "$PROFILE/airootfs/home/installer"
 cp -a "$PROFILE/airootfs/etc/skel/." "$PROFILE/airootfs/home/installer/"
 grep -q '^installer:' "$PROFILE/airootfs/etc/passwd" || \
@@ -51,7 +52,7 @@ grep -q '^installer:' "$PROFILE/airootfs/etc/passwd" || \
 grep -q '^installer:' "$PROFILE/airootfs/etc/group" || \
   echo 'installer:x:1000:' >> "$PROFILE/airootfs/etc/group"
 grep -q '^installer:' "$PROFILE/airootfs/etc/shadow" || \
-  echo 'installer:!:1::::::' >> "$PROFILE/airootfs/etc/shadow"
+  echo 'installer::1::::::' >> "$PROFILE/airootfs/etc/shadow"
 grep -q '^installer:' "$PROFILE/airootfs/etc/gshadow" || \
   echo 'installer:!::' >> "$PROFILE/airootfs/etc/gshadow"
 
@@ -60,20 +61,26 @@ sed -i 's/^iso_label=.*/iso_label="FEMBOY_$(date +%Y%m)"/' "$PROFILE/profiledef.
 sed -i 's|^iso_publisher=.*|iso_publisher="Femboy Linux Project"|' "$PROFILE/profiledef.sh"
 sed -i 's|^iso_application=.*|iso_application="Femboy Linux Installer"|' "$PROFILE/profiledef.sh"
 
+# NetworkManager + KDE's SDDM display manager in the live environment.
 mkdir -p "$PROFILE/airootfs/etc/systemd/system/multi-user.target.wants"
 ln -sf /usr/lib/systemd/system/NetworkManager.service \
   "$PROFILE/airootfs/etc/systemd/system/multi-user.target.wants/NetworkManager.service"
+mkdir -p "$PROFILE/airootfs/etc/systemd/system"
+ln -sf /usr/lib/systemd/system/sddm.service \
+  "$PROFILE/airootfs/etc/systemd/system/display-manager.service"
+ln -sf /usr/lib/systemd/system/graphical.target \
+  "$PROFILE/airootfs/etc/systemd/system/default.target"
 
 cat >> "$PROFILE/profiledef.sh" <<'EOF'
 file_permissions+=(
   ["/usr/local/bin/femboy-installer"]="0:0:0755"
   ["/usr/local/bin/femboy-install-backend"]="0:0:0755"
   ["/usr/bin/apt"]="0:0:0755"
-  ["/etc/skel/.xinitrc"]="0:0:0755"
   ["/home/installer"]="1000:1000:0755"
   ["/home/installer/.bash_profile"]="1000:1000:0644"
-  ["/home/installer/.xinitrc"]="1000:1000:0755"
   ["/etc/sudoers.d/10-installer"]="0:0:0440"
+  ["/etc/xdg/autostart/femboy-installer.desktop"]="0:0:0644"
+  ["/etc/sddm.conf.d/10-femboy.conf"]="0:0:0644"
 )
 EOF
 
