@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Femboy Linux Installer
+Comment=Install Femboy Linux to this computer
+Exec=/usr/local/bin/femboy-installer
+Icon=system-software-install
+Terminal=false
+X-KDE-autostart-after=panel
+X-KDE-StartupNotify=false
+OnlyShowIn=KDE;
