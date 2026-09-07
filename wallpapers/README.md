@@ -1,16 +1,41 @@
-# Femboy Linux wallpapers
+# Femboy Linux Wallpapers
 
-Upload the four wallpaper files into this directory using these names:
+Wallpapers bundled with Femboy Linux and available from KDE Plasma's wallpaper picker.
 
-- `whale-girl.webp` — default KDE wallpaper
-- `arch-anime.webp`
-- `debian-anime.webp`
-- `night-rooftop.webp`
+## Included wallpapers
 
-The distro branding/install scripts expect these exact names.
+| Wallpaper | File | Role |
+| --- | --- | --- |
+| Night Rooftop | `night-rooftop.webp` | **Default KDE Plasma wallpaper** |
+| Whale Girl | `whale-girl.webp` | Alternative wallpaper |
+| Arch Anime | `arch-anime.webp` | Alternative wallpaper |
+| Debian Anime | `debian-anime.webp` | Alternative wallpaper |
 
-The preferred installed location is:
+## Default
 
-`/usr/share/wallpapers/FemboyLinux/<name>/contents/images/`
+`night-rooftop.webp` is the default wallpaper used by the Femboy Linux Plasma look-and-feel package.
 
-`whale-girl.webp` is configured as the default Plasma wallpaper.
+The default is configured as:
+
+```ini
+[Wallpaper]
+Image=FemboyLinux/night-rooftop
+```
+
+## Installation layout
+
+During installation, these assets are packaged for KDE under:
+
+```text
+/usr/share/wallpapers/FemboyLinux/<name>/contents/images/
+```
+
+The source images in this directory should keep their current filenames because the distro build and wallpaper installation scripts reference them directly.
+
+## Adding another wallpaper
+
+1. Add the image to this directory, preferably as WebP.
+2. Add it to `installed-system/install-wallpapers.sh` with its native resolution.
+3. If it should become the default, update the Femboy Linux Plasma look-and-feel `contents/defaults` file.
+
+Please keep wallpapers reasonably compressed so they do not unnecessarily increase the installer ISO size.
