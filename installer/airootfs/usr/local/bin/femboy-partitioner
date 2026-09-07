@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+import json
+import subprocess
+from pathlib import Path
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QApplication, QComboBox, QDialog, QFormLayout, QHBoxLayout, QInputDialog,
+    QLabel, QMainWindow, QMessageBox, QPushButton, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget
+)
+
+TITLE = "Femboy Linux Partition Editor"
+
+
+def run(args, check=True):
+    return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+
+
+def text(args):
+    try:
+        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return ""
+
+
+def disk_list():
+    out = text(["lsblk", "-dpno", "NAME,SIZE,MODEL,TYPE"])
+    result = []
+    for line in out.splitlines():
+        p = line.split()
+        if p and p[-1] == "disk": result.append((p[0], " ".join(p[1:-1]) or "Disk"))
+    return result
+
+
+def partitions(disk):
+    try:
+        data = json.loads(subprocess.check_output(
+            ["lsblk", "-Jp", "-o", "NAME,SIZE,FSTYPE,TYPE,MOUNTPOINTS,PARTTYPE,PARTN", disk],
+            text=True, stderr=subprocess.DEVNULL))
+    except Exception:
+        return []
+    result = []
+    for d in data.get("blockdevices", []):
+        result.extend([c for c in (d.get("children") or []) if c.get("type") == "part"])
+    return result
+
+
+def free_regions(disk):
+    out = text(["parted", "-sm", disk, "unit", "MiB", "print", "free"])
+    regions = []
+    for line in out.splitlines():
+        if not line.endswith(":free;"): continue
+        f = line.rstrip(";").split(":")
+        if len(f) < 5: continue
+        try:
+            regions.append((float(f[1].replace("MiB", "")), float(f[2].replace("MiB", "")), float(f[3].replace("MiB", ""))))
+        except ValueError:
+            pass
+    return sorted(regions, key=lambda x: x[2], reverse=True)
+
+
+class NewPartitionDialog(QDialog):
+    def __init__(self, maximum, parent=None):
+        super().__init__(parent); self.setWindowTitle("Create partition")
+        v = QVBoxLayout(self); form = QFormLayout()
+        self.size = QComboBox(); self.size.setEditable(True); self.size.addItem(f"{maximum:.1f}")
+        self.fs = QComboBox(); self.fs.addItems(["ext4", "fat32", "btrfs", "xfs", "unformatted"])
+        form.addRow(f"Size in MiB (max {maximum:.1f})", self.size); form.addRow("Filesystem", self.fs); v.addLayout(form)
+        h = QHBoxLayout(); cancel = QPushButton("Cancel"); ok = QPushButton("Create"); cancel.clicked.connect(self.reject); ok.clicked.connect(self.accept)
+        h.addStretch(); h.addWidget(cancel); h.addWidget(ok); v.addLayout(h)
+
+
+class Editor(QMainWindow):
+    def __init__(self):
+        super().__init__(); self.setWindowTitle(TITLE); self.resize(900, 560)
+        root = QWidget(); self.setCentralWidget(root); v = QVBoxLayout(root)
+        title = QLabel("Manual partitioning"); title.setStyleSheet("font-size: 28px; font-weight: 700"); v.addWidget(title)
+        note = QLabel("Changes made here are applied to disk immediately. Use this only when you understand the partition layout. You can return to the installer afterward and assign / and EFI partitions.")
+        note.setWordWrap(True); v.addWidget(note)
+        self.disk = QComboBox()
+        for dev, desc in disk_list(): self.disk.addItem(f"{dev}    {desc}", dev)
+        self.disk.currentIndexChanged.connect(self.refresh); v.addWidget(self.disk)
+        self.free = QLabel(); v.addWidget(self.free)
+        self.table = QTableWidget(0, 5); self.table.setHorizontalHeaderLabels(["Device", "Size", "Filesystem", "Mounted at", "Type"])
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.horizontalHeader().setStretchLastSection(True); v.addWidget(self.table, 1)
+        h = QHBoxLayout()
+        for label, fn in [
+            ("New partition", self.create_partition), ("Delete", self.delete_partition),
+            ("Format", self.format_partition), ("Set EFI flag", self.set_efi), ("Refresh", self.refresh)
+        ]:
+            b = QPushButton(label); b.clicked.connect(fn); h.addWidget(b)
+        h.addStretch(); close = QPushButton("Done"); close.clicked.connect(self.close); h.addWidget(close); v.addLayout(h)
+        self.refresh()
+
+    def selected(self):
+        row = self.table.currentRow()
+        if row < 0: return None
+        return self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+
+    def refresh(self):
+        disk = self.disk.currentData(); self.table.setRowCount(0)
+        if not disk: return
+        regs = free_regions(disk); self.free.setText("Largest unallocated region: %.1f MiB" % regs[0][2] if regs else "No unallocated region detected")
+        for p in partitions(disk):
+            row = self.table.rowCount(); self.table.insertRow(row)
+            mounts = ", ".join(p.get("mountpoints") or [])
+            values = [p.get("name", ""), p.get("size", ""), p.get("fstype") or "unformatted", mounts, p.get("parttype") or ""]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value)); item.setData(Qt.ItemDataRole.UserRole, p); self.table.setItem(row, col, item)
+        self.table.resizeColumnsToContents()
+
+    def ensure_gpt(self):
+        disk = self.disk.currentData(); label = text(["parted", "-sm", disk, "print"]).splitlines()
+        if len(label) >= 2:
+            f = label[1].split(":")
+            if len(f) > 5 and f[5] == "gpt": return True
+        if partitions(disk):
+            QMessageBox.warning(self, TITLE, "Creating new partitions in the built-in editor currently requires a GPT disk. Use GParted for complex MBR layouts."); return False
+        if QMessageBox.question(self, TITLE, "This disk has no GPT partition table. Create one now? This destroys any existing partition table metadata.") != QMessageBox.StandardButton.Yes:
+            return False
+        r = run(["sudo", "-n", "parted", "-s", disk, "mklabel", "gpt"], check=False)
+        if r.returncode:
+            QMessageBox.critical(self, TITLE, r.stderr); return False
+        return True
+
+    def create_partition(self):
+        disk = self.disk.currentData()
+        if not disk or not self.ensure_gpt(): return
+        regs = free_regions(disk)
+        if not regs or regs[0][2] < 16:
+            QMessageBox.warning(self, TITLE, "No usable unallocated space was found."); return
+        start, end, available = regs[0]
+        dlg = NewPartitionDialog(max(1.0, available - 2.0), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        try: size = float(dlg.size.currentText())
+        except ValueError:
+            QMessageBox.warning(self, TITLE, "Invalid partition size."); return
+        if size <= 0 or size > available - 1:
+            QMessageBox.warning(self, TITLE, "Partition size is outside the available region."); return
+        pstart = start + 1.0; pend = min(end - 1.0, pstart + size); fs = dlg.fs.currentText()
+        fs_hint = "fat32" if fs == "fat32" else (fs if fs != "unformatted" else "")
+        cmd = ["sudo", "-n", "parted", "-s", disk, "unit", "MiB", "mkpart", "Femboy partition"]
+        if fs_hint: cmd.append(fs_hint)
+        cmd += [f"{pstart:.3f}MiB", f"{pend:.3f}MiB"]
+        r = run(cmd, check=False)
+        if r.returncode:
+            QMessageBox.critical(self, TITLE, r.stderr); return
+        subprocess.run(["sudo", "-n", "partprobe", disk]); subprocess.run(["sudo", "-n", "udevadm", "settle"])
+        self.refresh()
+        # Format the newly-created partition when a filesystem was requested.
+        newest = partitions(disk)
+        if fs != "unformatted" and newest:
+            target = newest[-1].get("name")
+            self.do_format(target, fs, confirm=False)
+        self.refresh()
+
+    def delete_partition(self):
+        p = self.selected()
+        if not p: return
+        path = p.get("name"); num = p.get("partn")
+        if not num:
+            num = text(["lsblk", "-no", "PARTN", path])
+        if QMessageBox.question(self, TITLE, f"Delete {path}? All data in this partition will be lost.") != QMessageBox.StandardButton.Yes: return
+        subprocess.run(["sudo", "-n", "umount", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        r = run(["sudo", "-n", "parted", "-s", self.disk.currentData(), "rm", str(num)], check=False)
+        if r.returncode: QMessageBox.critical(self, TITLE, r.stderr)
+        subprocess.run(["sudo", "-n", "partprobe", self.disk.currentData()]); self.refresh()
+
+    def format_partition(self):
+        p = self.selected()
+        if not p: return
+        fs, ok = QInputDialog.getItem(self, TITLE, "Filesystem", ["ext4", "fat32", "btrfs", "xfs"], 0, False)
+        if not ok: return
+        self.do_format(p.get("name"), fs, confirm=True); self.refresh()
+
+    def do_format(self, path, fs, confirm=True):
+        if confirm and QMessageBox.question(self, TITLE, f"Format {path} as {fs}? All files on it will be destroyed.") != QMessageBox.StandardButton.Yes: return
+        subprocess.run(["sudo", "-n", "umount", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        commands = {
+            "ext4": ["mkfs.ext4", "-F", path], "fat32": ["mkfs.fat", "-F32", path],
+            "btrfs": ["mkfs.btrfs", "-f", path], "xfs": ["mkfs.xfs", "-f", path],
+        }
+        r = run(["sudo", "-n"] + commands[fs], check=False)
+        if r.returncode: QMessageBox.critical(self, TITLE, r.stderr)
+
+    def set_efi(self):
+        p = self.selected()
+        if not p: return
+        path = p.get("name"); num = p.get("partn") or text(["lsblk", "-no", "PARTN", path])
+        r = run(["sudo", "-n", "parted", "-s", self.disk.currentData(), "set", str(num), "esp", "on"], check=False)
+        if r.returncode: QMessageBox.critical(self, TITLE, r.stderr)
+        self.refresh()
+
+
+app = QApplication([])
+w = Editor(); w.show(); app.exec()
