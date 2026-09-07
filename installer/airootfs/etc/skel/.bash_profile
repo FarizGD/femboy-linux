@@ -1,3 +1,1 @@
-if [[ -z "${DISPLAY:-}" && "$(tty)" == /dev/tty1 ]]; then
-  exec startx
-fi
+# KDE Plasma is started by SDDM on the live installer ISO.
