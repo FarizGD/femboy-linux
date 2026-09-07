@@ -8,10 +8,11 @@ on:
       - 'build.sh'
       - 'installer/**'
       - 'installed-system/**'
+      - 'wallpapers/**'
       - '.github/workflows/build-iso.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -24,7 +25,7 @@ jobs:
       - name: Install build dependencies
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm --needed archiso git rsync sudo
+          pacman -S --noconfirm --needed archiso git rsync sudo github-cli
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -39,13 +40,20 @@ jobs:
           ls -lah out
           sha256sum out/*.iso
 
-      - name: Upload ISO artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: femboy-linux-iso
-          path: |
-            out/*.iso
-            out/*.sha256
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
+      - name: Publish ISO to rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="nightly"
+          TITLE="Femboy Linux Nightly"
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "$TITLE" \
+              --notes "Automated Femboy Linux ISO build from the latest main branch." \
+              --prerelease
+          fi
+
+          gh release upload "$TAG" out/*.iso out/*.sha256 --clobber
