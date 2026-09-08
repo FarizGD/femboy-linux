@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Apply Femboy Linux Wallpaper
+Comment=Apply the Femboy Linux default wallpaper on first Plasma login
+Exec=/usr/local/bin/femboy-apply-wallpaper
+Terminal=false
+OnlyShowIn=KDE;
+X-KDE-autostart-after=panel
+X-KDE-StartupNotify=false
