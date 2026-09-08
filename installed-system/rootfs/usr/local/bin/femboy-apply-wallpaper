@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -u
+
+MARKER="${XDG_CONFIG_HOME:-$HOME/.config}/femboy-linux/night-rooftop-applied"
+WALLPAPER='/usr/share/wallpapers/FemboyLinux/night-rooftop/contents/images/2048x1152.webp'
+
+[[ -e "$MARKER" ]] && exit 0
+[[ -f "$WALLPAPER" ]] || exit 0
+
+# Wait until Plasma has created the desktop containment. Plasma 6 ships
+# plasma-apply-wallpaperimage as part of plasma-workspace.
+for _ in {1..30}; do
+  if command -v plasma-apply-wallpaperimage >/dev/null 2>&1 && \
+     plasma-apply-wallpaperimage "$WALLPAPER" >/dev/null 2>&1; then
+    mkdir -p "$(dirname "$MARKER")"
+    : > "$MARKER"
+    exit 0
+  fi
+  sleep 1
+ done
+
+exit 0
