@@ -194,12 +194,22 @@ chmod 440 /mnt/etc/sudoers.d/10-wheel
 stage "Enabling services"
 arch-chroot /mnt systemctl enable NetworkManager.service
 arch-chroot /mnt systemctl enable sddm.service
+arch-chroot /mnt systemctl set-default graphical.target
+
+stage "Generating initramfs"
+arch-chroot /mnt mkinitcpio -P
 
 stage "Installing bootloader"
 if [[ "$MODE" == uefi ]]; then
-  arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id='Femboy Linux'
+  # Install both the normal NVRAM entry and the standard removable fallback.
+  # The fallback creates EFI/BOOT/BOOTX64.EFI, which also boots on firmware/VMs
+  # that lose or ignore the GRUB NVRAM entry after installation.
+  if ! arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id='Femboy Linux' --recheck; then
+    echo "Normal UEFI registration failed; installing removable fallback only" >&2
+  fi
+  arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id='Femboy Linux' --removable --no-nvram --recheck
 else
-  arch-chroot /mnt grub-install --target=i386-pc "$DISK"
+  arch-chroot /mnt grub-install --target=i386-pc --recheck "$DISK"
 fi
 arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
 
@@ -213,9 +223,12 @@ if [[ -d /usr/share/femboy-linux/rootfs ]]; then
   cp -a /usr/share/femboy-linux/rootfs/. /mnt/
 fi
 
-# Install the bundled wallpapers into the actual KDE system wallpaper path.
-# The old temporary-payload approach made the helper resolve /tmp/wallpapers,
-# so the script silently skipped every image.
+# The GitHub contents API stores new text files as 0644. Make the first-login
+# helper executable after copying the distro rootfs payload.
+if [[ -f /mnt/usr/local/bin/femboy-apply-wallpaper ]]; then
+  chmod 755 /mnt/usr/local/bin/femboy-apply-wallpaper
+fi
+
 if [[ -d /usr/share/femboy-linux/wallpapers && -x /usr/share/femboy-linux/install-wallpapers.sh ]]; then
   WALLPAPER_SRC=/usr/share/femboy-linux/wallpapers \
     DESTDIR=/mnt \
